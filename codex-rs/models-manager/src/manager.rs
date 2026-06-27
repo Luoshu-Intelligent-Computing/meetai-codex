@@ -552,6 +552,8 @@ pub(crate) fn construct_model_info_from_candidates(
             used_fallback_model_metadata: false,
             ..remote
         }
+    } else if let Some(known_local) = model_info::known_local_model_info_from_slug(model) {
+        known_local
     } else {
         model_info::model_info_from_slug(model)
     };

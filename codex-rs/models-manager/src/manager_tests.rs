@@ -366,6 +366,24 @@ async fn get_model_info_tracks_fallback_usage() {
 }
 
 #[tokio::test]
+async fn get_model_info_recognizes_qwen_local_profile() {
+    let codex_home = tempdir().expect("temp dir");
+    let config = ModelsManagerConfig::default();
+    let manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(Vec::new()),
+    );
+
+    let model_info = manager.get_model_info("Qwen3.6-35B-A3B-Q4", &config).await;
+
+    assert_eq!(model_info.slug, "Qwen3.6-35B-A3B-Q4");
+    assert_eq!(model_info.display_name, "Qwen3.6 35B A3B Q4");
+    assert_eq!(model_info.context_window, Some(131_072));
+    assert!(!model_info.supports_parallel_tool_calls);
+    assert!(!model_info.used_fallback_model_metadata);
+}
+
+#[tokio::test]
 async fn get_model_info_uses_custom_catalog() {
     let config = ModelsManagerConfig::default();
     let mut overlay = remote_model("gpt-overlay", "Overlay", /*priority*/ 0);

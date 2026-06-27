@@ -3,6 +3,28 @@ use crate::ModelsManagerConfig;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn qwen_local_profile_is_known_metadata() {
+    let model = known_local_model_info_from_slug("Qwen3.6-35B-A3B-Q4")
+        .expect("Qwen3.6 should have local metadata");
+
+    assert_eq!(model.slug, "Qwen3.6-35B-A3B-Q4");
+    assert_eq!(model.display_name, "Qwen3.6 35B A3B Q4");
+    assert_eq!(model.context_window, Some(131_072));
+    assert_eq!(model.max_context_window, Some(131_072));
+    assert_eq!(
+        model.truncation_policy,
+        TruncationPolicyConfig::tokens(10_000)
+    );
+    assert_eq!(model.shell_type, ConfigShellToolType::ShellCommand);
+    assert_eq!(
+        model.apply_patch_tool_type,
+        Some(ApplyPatchToolType::Freeform)
+    );
+    assert!(!model.supports_parallel_tool_calls);
+    assert!(!model.used_fallback_model_metadata);
+}
+
+#[test]
 fn reasoning_summaries_override_true_enables_support() {
     let model = model_info_from_slug("unknown-model");
     let config = ModelsManagerConfig {
