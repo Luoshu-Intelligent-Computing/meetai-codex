@@ -1,34 +1,50 @@
 mod invocation;
 mod parser;
+#[cfg(feature = "executor")]
 mod seek_sequence;
+#[cfg(feature = "executor")]
 mod standalone_executable;
 mod streaming_parser;
 
 use std::collections::HashMap;
+#[cfg(feature = "executor")]
 use std::io;
+#[cfg(feature = "executor")]
 use std::path::PathBuf;
 
+#[cfg(feature = "executor")]
 use anyhow::Context;
-use anyhow::Result;
+#[cfg(feature = "executor")]
 use codex_exec_server::CreateDirectoryOptions;
+#[cfg(feature = "executor")]
 use codex_exec_server::ExecutorFileSystem;
+#[cfg(feature = "executor")]
 use codex_exec_server::FileSystemSandboxContext;
+#[cfg(feature = "executor")]
 use codex_exec_server::RemoveOptions;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
 pub use parser::Hunk;
 pub use parser::ParseError;
+#[cfg(feature = "executor")]
 use parser::ParseError::*;
 pub use parser::UpdateFileChunk;
 pub use parser::parse_patch;
+#[cfg(feature = "executor")]
 use similar::TextDiff;
 pub use streaming_parser::StreamingPatchParser;
 use thiserror::Error;
 
+pub use invocation::MaybeApplyPatch;
+pub use invocation::maybe_parse_apply_patch;
+#[cfg(feature = "executor")]
 pub use invocation::maybe_parse_apply_patch_verified;
+#[cfg(feature = "executor")]
 pub use invocation::verify_apply_patch_args;
+#[cfg(feature = "executor")]
 pub use standalone_executable::main;
 
+#[cfg(feature = "executor")]
 use crate::invocation::ExtractHeredocError;
 
 /// Special argv[1] flag used when the Codex executable self-invokes to run the
@@ -117,6 +133,7 @@ pub enum ApplyPatchFileChange {
     },
 }
 
+#[cfg(feature = "executor")]
 #[derive(Debug, PartialEq)]
 pub enum MaybeApplyPatchVerified {
     /// `argv` corresponded to an `apply_patch` invocation, and these are the
@@ -180,12 +197,14 @@ impl ApplyPatchAction {
 }
 
 /// Textual file changes that were actually committed while applying a patch.
+#[cfg(feature = "executor")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppliedPatchDelta {
     changes: Vec<AppliedPatchChange>,
     exact: bool,
 }
 
+#[cfg(feature = "executor")]
 impl AppliedPatchDelta {
     fn new(changes: Vec<AppliedPatchChange>, exact: bool) -> Self {
         Self { changes, exact }
@@ -214,6 +233,7 @@ impl AppliedPatchDelta {
     }
 }
 
+#[cfg(feature = "executor")]
 impl Default for AppliedPatchDelta {
     fn default() -> Self {
         Self::empty()
@@ -221,12 +241,14 @@ impl Default for AppliedPatchDelta {
 }
 
 /// A committed file change, preserved in the order it was applied.
+#[cfg(feature = "executor")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppliedPatchChange {
     pub path: PathBuf,
     pub change: AppliedPatchFileChange,
 }
 
+#[cfg(feature = "executor")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppliedPatchFileChange {
     Add {
@@ -246,6 +268,7 @@ pub enum AppliedPatchFileChange {
 
 /// A failed patch application together with the textual mutations that were
 /// definitely committed before the failure was observed.
+#[cfg(feature = "executor")]
 #[derive(Debug, Error)]
 #[error("{error}")]
 pub struct ApplyPatchFailure {
@@ -254,6 +277,7 @@ pub struct ApplyPatchFailure {
     delta: AppliedPatchDelta,
 }
 
+#[cfg(feature = "executor")]
 impl ApplyPatchFailure {
     fn new(error: ApplyPatchError, delta: AppliedPatchDelta) -> Self {
         Self { error, delta }
@@ -273,6 +297,7 @@ impl ApplyPatchFailure {
 }
 
 /// Applies the patch and prints the result to stdout/stderr.
+#[cfg(feature = "executor")]
 pub async fn apply_patch(
     patch: &str,
     cwd: &PathUri,
@@ -312,6 +337,7 @@ pub async fn apply_patch(
 }
 
 /// Applies hunks and continues to update stdout/stderr
+#[cfg(feature = "executor")]
 pub async fn apply_hunks(
     hunks: &[Hunk],
     cwd: &PathUri,
@@ -350,6 +376,7 @@ pub async fn apply_hunks(
 /// Returns an error if any of the changes could not be applied.
 /// Tracks file paths affected by applying a patch, preserving the path spelling
 /// from the patch for user-facing summaries.
+#[cfg(feature = "executor")]
 pub struct AffectedPaths {
     pub added: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
@@ -358,6 +385,7 @@ pub struct AffectedPaths {
 
 /// Apply the hunks to the filesystem, returning which files were added, modified, or deleted.
 /// Returns an error if the patch could not be applied.
+#[cfg(feature = "executor")]
 async fn apply_hunks_to_files(
     hunks: &[Hunk],
     cwd: &PathUri,
@@ -566,6 +594,7 @@ async fn apply_hunks_to_files(
     })
 }
 
+#[cfg(feature = "executor")]
 async fn ensure_not_directory(
     path: &PathUri,
     fs: &dyn ExecutorFileSystem,
@@ -581,6 +610,7 @@ async fn ensure_not_directory(
     Ok(())
 }
 
+#[cfg(feature = "executor")]
 async fn remove_failure_was_side_effect_free(
     path: &PathUri,
     expected_content: Option<&str>,
@@ -596,6 +626,7 @@ async fn remove_failure_was_side_effect_free(
     }
 }
 
+#[cfg(feature = "executor")]
 async fn read_optional_file_text_for_delta(
     path: &PathUri,
     fs: &dyn ExecutorFileSystem,
@@ -613,6 +644,7 @@ async fn read_optional_file_text_for_delta(
     }
 }
 
+#[cfg(feature = "executor")]
 async fn note_existing_path_delta_support(
     path: &PathUri,
     fs: &dyn ExecutorFileSystem,
@@ -627,6 +659,7 @@ async fn note_existing_path_delta_support(
     }
 }
 
+#[cfg(feature = "executor")]
 async fn write_file_with_missing_parent_retry(
     fs: &dyn ExecutorFileSystem,
     path: &PathUri,
@@ -665,6 +698,7 @@ async fn write_file_with_missing_parent_retry(
     }
 }
 
+#[cfg(feature = "executor")]
 struct AppliedPatch {
     original_contents: String,
     new_contents: String,
@@ -672,6 +706,7 @@ struct AppliedPatch {
 
 /// Return *only* the new file contents (joined into a single `String`) after
 /// applying the chunks to the file at `path`.
+#[cfg(feature = "executor")]
 async fn derive_new_contents_from_chunks(
     path: &PathUri,
     chunks: &[UpdateFileChunk],
@@ -713,6 +748,7 @@ async fn derive_new_contents_from_chunks(
 /// Compute a list of replacements needed to transform `original_lines` into the
 /// new lines, given the patch `chunks`. Each replacement is returned as
 /// `(start_index, old_len, new_lines)`.
+#[cfg(feature = "executor")]
 fn compute_replacements(
     original_lines: &[String],
     path: &str,
@@ -803,6 +839,7 @@ fn compute_replacements(
 
 /// Apply the `(start_index, old_len, new_lines)` replacements to `original_lines`,
 /// returning the modified file contents as a vector of lines.
+#[cfg(feature = "executor")]
 fn apply_replacements(
     mut lines: Vec<String>,
     replacements: &[(usize, usize, Vec<String>)],
@@ -830,6 +867,7 @@ fn apply_replacements(
 }
 
 /// Intended result of a file update for apply_patch.
+#[cfg(feature = "executor")]
 #[derive(Debug, Eq, PartialEq)]
 pub struct ApplyPatchFileUpdate {
     unified_diff: String,
@@ -837,6 +875,7 @@ pub struct ApplyPatchFileUpdate {
     content: String,
 }
 
+#[cfg(feature = "executor")]
 pub async fn unified_diff_from_chunks(
     path: &PathUri,
     chunks: &[UpdateFileChunk],
@@ -846,6 +885,7 @@ pub async fn unified_diff_from_chunks(
     unified_diff_from_chunks_with_context(path, chunks, /*context*/ 1, fs, sandbox).await
 }
 
+#[cfg(feature = "executor")]
 pub async fn unified_diff_from_chunks_with_context(
     path: &PathUri,
     chunks: &[UpdateFileChunk],
@@ -868,6 +908,7 @@ pub async fn unified_diff_from_chunks_with_context(
 
 /// Print the summary of changes in git-style format.
 /// Write a summary of changes to the given writer.
+#[cfg(feature = "executor")]
 pub fn print_summary(
     affected: &AffectedPaths,
     out: &mut impl std::io::Write,
@@ -885,7 +926,7 @@ pub fn print_summary(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "executor"))]
 mod tests {
     use super::*;
     use codex_exec_server::LOCAL_FS;
