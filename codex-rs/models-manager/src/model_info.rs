@@ -1,6 +1,5 @@
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Verbosity;
-use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
@@ -150,12 +149,12 @@ fn meetai_qwen_3_6_model_info(slug: &str) -> ModelInfo {
         availability_nux: None,
         upgrade: None,
         base_instructions: BASE_INSTRUCTIONS.to_string(),
-        model_messages: None,
+        model_messages: local_personality_messages_for_slug(slug),
         supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: true,
         default_verbosity: Some(Verbosity::Low),
-        apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
+        apply_patch_tool_type: None,
         web_search_tool_type: WebSearchToolType::Text,
         truncation_policy: TruncationPolicyConfig::tokens(/*limit*/ 10_000),
         supports_parallel_tool_calls: false,
@@ -178,16 +177,18 @@ fn meetai_qwen_3_6_model_info(slug: &str) -> ModelInfo {
 
 fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
     match slug {
-        "gpt-5.2-codex" | "exp-codex-personality" => Some(ModelMessages {
-            instructions_template: Some(format!(
-                "{DEFAULT_PERSONALITY_HEADER}\n\n{PERSONALITY_PLACEHOLDER}\n\n{BASE_INSTRUCTIONS}"
-            )),
-            instructions_variables: Some(ModelInstructionsVariables {
-                personality_default: Some(String::new()),
-                personality_friendly: Some(LOCAL_FRIENDLY_TEMPLATE.to_string()),
-                personality_pragmatic: Some(LOCAL_PRAGMATIC_TEMPLATE.to_string()),
-            }),
-        }),
+        "gpt-5.2-codex" | "exp-codex-personality" | MEETAI_QWEN_3_6_35B_MODEL_ID => {
+            Some(ModelMessages {
+                instructions_template: Some(format!(
+                    "{DEFAULT_PERSONALITY_HEADER}\n\n{PERSONALITY_PLACEHOLDER}\n\n{BASE_INSTRUCTIONS}"
+                )),
+                instructions_variables: Some(ModelInstructionsVariables {
+                    personality_default: Some(String::new()),
+                    personality_friendly: Some(LOCAL_FRIENDLY_TEMPLATE.to_string()),
+                    personality_pragmatic: Some(LOCAL_PRAGMATIC_TEMPLATE.to_string()),
+                }),
+            })
+        }
         _ => None,
     }
 }

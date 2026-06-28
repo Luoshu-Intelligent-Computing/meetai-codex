@@ -16,9 +16,12 @@ fn qwen_local_profile_is_known_metadata() {
         TruncationPolicyConfig::tokens(10_000)
     );
     assert_eq!(model.shell_type, ConfigShellToolType::ShellCommand);
-    assert_eq!(
-        model.apply_patch_tool_type,
-        Some(ApplyPatchToolType::Freeform)
+    assert_eq!(model.apply_patch_tool_type, None);
+    assert!(model.supports_personality());
+    assert!(
+        model
+            .get_model_instructions(Some(codex_protocol::config_types::Personality::Pragmatic))
+            .contains(LOCAL_PRAGMATIC_TEMPLATE)
     );
     assert!(!model.supports_parallel_tool_calls);
     assert!(!model.used_fallback_model_metadata);
