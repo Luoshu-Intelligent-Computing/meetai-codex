@@ -29,6 +29,38 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
 
 impl CoreToolRuntime for TestHandler {}
 
+struct AliasTestHandler {
+    tool_name: codex_tools::ToolName,
+    aliases: Vec<codex_tools::ToolName>,
+}
+
+impl ToolExecutor<ToolInvocation> for AliasTestHandler {
+    fn tool_name(&self) -> codex_tools::ToolName {
+        self.tool_name.clone()
+    }
+
+    fn spec(&self) -> codex_tools::ToolSpec {
+        test_spec(&self.tool_name)
+    }
+
+    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async {
+            Ok(
+                Box::new(crate::tools::context::FunctionToolOutput::from_text(
+                    "ok".to_string(),
+                    Some(true),
+                )) as Box<dyn crate::tools::context::ToolOutput>,
+            )
+        })
+    }
+}
+
+impl CoreToolRuntime for AliasTestHandler {
+    fn tool_aliases(&self) -> Vec<codex_tools::ToolName> {
+        self.aliases.clone()
+    }
+}
+
 #[derive(Clone)]
 enum LifecycleTestResult {
     Ok { success: bool },
@@ -176,6 +208,33 @@ fn handler_looks_up_namespaced_aliases_explicitly() {
         namespaced
             .as_ref()
             .is_some_and(|handler| Arc::ptr_eq(handler, &namespaced_handler))
+    );
+}
+
+#[test]
+fn registry_registers_handler_aliases_to_same_runtime() {
+    let canonical_name = codex_tools::ToolName::namespaced("meetai_resource", "search_meetings");
+    let flat_alias = codex_tools::ToolName::plain("meetai_resource__search_meetings");
+    let handler = Arc::new(AliasTestHandler {
+        tool_name: canonical_name.clone(),
+        aliases: vec![flat_alias.clone()],
+    }) as Arc<dyn CoreToolRuntime>;
+
+    let registry = ToolRegistry::from_tools([Arc::clone(&handler)]);
+
+    let canonical = registry.tool(&canonical_name);
+    let alias = registry.tool(&flat_alias);
+    assert_eq!(canonical.is_some(), true);
+    assert_eq!(alias.is_some(), true);
+    assert!(
+        canonical
+            .as_ref()
+            .is_some_and(|registered| Arc::ptr_eq(registered, &handler))
+    );
+    assert!(
+        alias
+            .as_ref()
+            .is_some_and(|registered| Arc::ptr_eq(registered, &handler))
     );
 }
 

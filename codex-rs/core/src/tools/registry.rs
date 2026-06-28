@@ -46,6 +46,10 @@ pub use codex_tools::ToolExposure;
 /// Implementers provide the shared `ToolExecutor` behavior plus optional
 /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
 pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+    fn tool_aliases(&self) -> Vec<ToolName> {
+        Vec::new()
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(
             payload,
@@ -278,6 +282,10 @@ impl ToolExecutor<ToolInvocation> for ExposureOverride {
 }
 
 impl CoreToolRuntime for ExposureOverride {
+    fn tool_aliases(&self) -> Vec<ToolName> {
+        self.handler.tool_aliases()
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         self.handler.matches_kind(payload)
     }
@@ -337,7 +345,14 @@ impl ToolRegistry {
                 error_or_panic(format!("tool {name} already registered"));
                 continue;
             }
-            tools_by_name.insert(name, tool);
+            tools_by_name.insert(name, Arc::clone(&tool));
+            for alias in tool.tool_aliases() {
+                if tools_by_name.contains_key(&alias) {
+                    error_or_panic(format!("tool alias {alias} already registered"));
+                    continue;
+                }
+                tools_by_name.insert(alias, Arc::clone(&tool));
+            }
         }
         Self::new(tools_by_name)
     }

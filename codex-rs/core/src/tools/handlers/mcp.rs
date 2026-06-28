@@ -22,6 +22,7 @@ use codex_tools::ToolName;
 use codex_tools::ToolSearchInfo;
 use codex_tools::ToolSearchSourceInfo;
 use codex_tools::ToolSpec;
+use codex_tools::code_mode_name_for_tool_name;
 use codex_tools::mcp_tool_to_responses_api_tool;
 use serde_json::Map;
 use serde_json::Value;
@@ -32,12 +33,29 @@ const MCP_TOOL_NAME_DELIMITER: &str = "__";
 pub struct McpHandler {
     tool_info: ToolInfo,
     spec: ToolSpec,
+    flat_tool_alias: Option<ToolName>,
 }
 
 impl McpHandler {
     pub fn new(tool_info: ToolInfo) -> Result<Self, serde_json::Error> {
         let spec = create_tool_spec(&tool_info)?;
-        Ok(Self { tool_info, spec })
+        Ok(Self {
+            tool_info,
+            spec,
+            flat_tool_alias: None,
+        })
+    }
+
+    pub fn new_flat(tool_info: ToolInfo) -> Result<Self, serde_json::Error> {
+        let tool_name = tool_info.canonical_tool_name();
+        let flat_tool_name = code_mode_name_for_tool_name(&tool_name);
+        let flat_tool_alias = ToolName::plain(flat_tool_name);
+        let spec = create_flat_tool_spec(&tool_info, &flat_tool_alias)?;
+        Ok(Self {
+            tool_info,
+            spec,
+            flat_tool_alias: Some(flat_tool_alias),
+        })
     }
 
     fn hook_tool_name(&self) -> HookToolName {
@@ -164,6 +182,10 @@ impl McpHandler {
 }
 
 impl CoreToolRuntime for McpHandler {
+    fn tool_aliases(&self) -> Vec<ToolName> {
+        self.flat_tool_alias.iter().cloned().collect()
+    }
+
     fn telemetry_tags<'a>(
         &'a self,
         _invocation: &'a ToolInvocation,
@@ -254,6 +276,14 @@ fn create_tool_spec(tool_info: &ToolInfo) -> Result<ToolSpec, serde_json::Error>
         description,
         tools: vec![ResponsesApiNamespaceTool::Function(tool)],
     }))
+}
+
+fn create_flat_tool_spec(
+    tool_info: &ToolInfo,
+    flat_tool_name: &ToolName,
+) -> Result<ToolSpec, serde_json::Error> {
+    let tool = mcp_tool_to_responses_api_tool(flat_tool_name, &tool_info.tool)?;
+    Ok(ToolSpec::Function(tool))
 }
 
 fn mcp_hook_tool_input(raw_arguments: &str) -> Value {

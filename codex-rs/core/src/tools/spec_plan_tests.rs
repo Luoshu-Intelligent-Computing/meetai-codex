@@ -826,6 +826,44 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 }
 
 #[tokio::test]
+async fn flat_mcp_tool_names_expose_direct_mcp_tools_as_functions() {
+    let plan = probe_with(
+        |turn| {
+            set_feature(turn, Feature::FlatMcpToolNames, /*enabled*/ true);
+        },
+        ToolPlanInputs {
+            mcp_tools: Some(vec![mcp_tool(
+                "direct",
+                "meetai_resource",
+                "search_meetings",
+            )]),
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    plan.assert_visible_contains(&["meetai_resource__search_meetings"]);
+    assert_eq!(
+        plan.namespace_function_names("meetai_resource"),
+        Vec::<String>::new()
+    );
+    plan.assert_registered_contains(&[
+        &ToolName::namespaced("meetai_resource", "search_meetings").to_string(),
+        "meetai_resource__search_meetings",
+    ]);
+    assert_eq!(
+        plan.exposure("meetai_resource__search_meetings"),
+        ToolExposure::Direct
+    );
+
+    let ToolSpec::Function(tool) = plan.visible_spec("meetai_resource__search_meetings") else {
+        panic!("flat MCP tool should be exposed as a function tool");
+    };
+    assert_eq!(tool.name, "meetai_resource__search_meetings");
+    assert_eq!(tool.description, "search_meetings test tool");
+}
+
+#[tokio::test]
 async fn deferred_extension_tools_are_discoverable_with_tool_search() {
     let plan = probe_with(
         |turn| {
