@@ -129,8 +129,35 @@ fn parse_commands(call: &ToolCall) -> Result<SearchCommands, FunctionCallError> 
         return Ok(SearchCommands::default());
     }
 
-    serde_json::from_str(arguments)
-        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+    let mut commands: SearchCommands = serde_json::from_str(arguments)
+        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
+    keep_search_query_commands_only(&mut commands)?;
+    Ok(commands)
+}
+
+fn keep_search_query_commands_only(commands: &mut SearchCommands) -> Result<(), FunctionCallError> {
+    let has_search_query = commands
+        .search_query
+        .as_ref()
+        .is_some_and(|queries| !queries.is_empty());
+
+    commands.image_query = None;
+    commands.open = None;
+    commands.click = None;
+    commands.find = None;
+    commands.screenshot = None;
+    commands.finance = None;
+    commands.weather = None;
+    commands.sports = None;
+    commands.time = None;
+
+    if has_search_query || commands.response_length.is_some() {
+        return Ok(());
+    }
+
+    Err(FunctionCallError::RespondToModel(
+        "This deployment only supports web.run search_query. Retry with a search_query request; do not use other web.run commands, shell commands, curl, browser scraping, or an external browser.".to_string(),
+    ))
 }
 
 fn command_action(commands: &SearchCommands) -> WebSearchAction {
@@ -191,10 +218,12 @@ fn web_search_item(call_id: &str, action: WebSearchAction) -> ExtensionTurnItem 
 #[cfg(test)]
 mod tests {
     use codex_api::SearchCommands;
+    use codex_api::SearchResponseLength;
     use codex_protocol::models::WebSearchAction;
     use pretty_assertions::assert_eq;
 
     use super::command_action;
+    use super::keep_search_query_commands_only;
 
     #[test]
     fn command_action_reports_queries_and_navigation_detail() {
@@ -237,5 +266,36 @@ mod tests {
                 serde_json::from_str(arguments).expect("valid search command arguments");
             assert_eq!(command_action(&commands), expected);
         }
+    }
+
+    #[test]
+    fn keep_search_query_commands_only_strips_unsupported_mixed_commands() {
+        let mut commands: SearchCommands = serde_json::from_str(
+            r#"{"finance":[{"ticker":"BTC","type":"crypto","market":""}],"sports":[{"fn":"standings","league":"ipl"}],"search_query":[{"q":"FIFA World Cup latest news","recency":7}],"response_length":"short"}"#,
+        )
+        .expect("mixed commands should parse");
+
+        keep_search_query_commands_only(&mut commands).expect("search query should be preserved");
+
+        assert!(commands.search_query.is_some());
+        assert_eq!(commands.response_length, Some(SearchResponseLength::Short));
+        assert!(commands.finance.is_none());
+        assert!(commands.sports.is_none());
+    }
+
+    #[test]
+    fn keep_search_query_commands_only_rejects_unsupported_without_query() {
+        let mut commands: SearchCommands =
+            serde_json::from_str(r#"{"finance":[{"ticker":"BTC","type":"crypto","market":""}]}"#)
+                .expect("finance command should parse");
+
+        let error = keep_search_query_commands_only(&mut commands)
+            .expect_err("unsupported commands without search_query should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("only supports web.run search_query")
+        );
     }
 }
