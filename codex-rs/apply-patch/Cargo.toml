@@ -14,6 +14,11 @@ name = "apply_patch"
 path = "src/main.rs"
 required-features = ["executor"]
 
+[[test]]
+name = "all"
+path = "tests/all.rs"
+required-features = ["executor"]
+
 [features]
 default = ["executor"]
 executor = ["dep:anyhow", "dep:codex-exec-server", "dep:similar", "dep:tokio"]

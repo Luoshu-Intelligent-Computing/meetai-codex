@@ -59,9 +59,9 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
 
     if let Some(base_instructions) = &config.base_instructions {
         model.base_instructions = base_instructions.clone();
-        model.model_messages = None;
+        clear_instruction_messages(&mut model);
     } else if !config.personality_enabled {
-        model.model_messages = None;
+        clear_instruction_messages(&mut model);
     }
 
     model
@@ -71,6 +71,16 @@ pub fn known_local_model_info_from_slug(slug: &str) -> Option<ModelInfo> {
     match slug {
         MEETAI_QWEN_3_6_35B_MODEL_ID => Some(meetai_qwen_3_6_model_info(slug)),
         _ => None,
+    }
+}
+
+fn clear_instruction_messages(model: &mut ModelInfo) {
+    if let Some(model_messages) = &mut model.model_messages {
+        model_messages.instructions_template = None;
+        model_messages.instructions_variables = None;
+        if model_messages.approvals.is_none() {
+            model.model_messages = None;
+        }
     }
 }
 
@@ -94,6 +104,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         upgrade: None,
         base_instructions: BASE_INSTRUCTIONS.to_string(),
         model_messages: local_personality_messages_for_slug(slug),
+        include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
@@ -150,6 +161,7 @@ fn meetai_qwen_3_6_model_info(slug: &str) -> ModelInfo {
         upgrade: None,
         base_instructions: BASE_INSTRUCTIONS.to_string(),
         model_messages: local_personality_messages_for_slug(slug),
+        include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: true,
@@ -187,6 +199,7 @@ fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
                     personality_friendly: Some(LOCAL_FRIENDLY_TEMPLATE.to_string()),
                     personality_pragmatic: Some(LOCAL_PRAGMATIC_TEMPLATE.to_string()),
                 }),
+                approvals: None,
             })
         }
         _ => None,

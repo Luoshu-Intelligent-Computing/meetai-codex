@@ -150,6 +150,7 @@
       "enum": [
         "auto",
         "prompt",
+        "writes",
         "approve"
       ],
       "type": "string"
@@ -469,6 +470,9 @@
             "computer_use": {
               "type": "boolean"
             },
+            "concurrent_reasoning_summaries": {
+              "type": "boolean"
+            },
             "connectors": {
               "type": "boolean"
             },
@@ -509,6 +513,9 @@
               "type": "boolean"
             },
             "fast_mode": {
+              "type": "boolean"
+            },
+            "flat_mcp_tool_names": {
               "type": "boolean"
             },
             "goals": {
@@ -1750,6 +1757,9 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "multi_agent_mode_hint_text": {
+          "type": "string"
+        },
         "non_code_mode_only": {
           "type": "boolean"
         },
@@ -2123,7 +2133,7 @@
       "description": "Determine where Codex should store and read MCP credentials.",
       "oneOf": [
         {
-          "description": "`Keyring` when available; otherwise, `File`. Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.",
+          "description": "Prefer `Keyring` and use `File` when keyring storage is unavailable. Once an MCP client loads credentials from one store, that client keeps the resolved store for its lifetime so refreshes cannot switch to a possibly stale credential source. Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.",
           "enum": [
             "auto"
           ],
@@ -4835,6 +4845,9 @@
         "computer_use": {
           "type": "boolean"
         },
+        "concurrent_reasoning_summaries": {
+          "type": "boolean"
+        },
         "connectors": {
           "type": "boolean"
         },
@@ -4875,6 +4888,9 @@
           "type": "boolean"
         },
         "fast_mode": {
+          "type": "boolean"
+        },
+        "flat_mcp_tool_names": {
           "type": "boolean"
         },
         "goals": {
