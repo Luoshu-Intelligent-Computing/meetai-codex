@@ -842,6 +842,7 @@ mod tests {
             })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
+            temperature: Some(0.0),
             reasoning: None,
             store: false,
             stream: true,

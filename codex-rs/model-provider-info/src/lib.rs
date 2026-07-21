@@ -138,6 +138,11 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the Responses API WebSocket transport.
     #[serde(default)]
     pub supports_websockets: bool,
+    /// Optional sampling temperature forwarded to Responses requests.
+    pub temperature: Option<f64>,
+    /// Whether `/responses/compact` requests should omit the turn's tool catalog.
+    #[serde(default)]
+    pub omit_tools_for_responses_compact: bool,
 }
 
 /// AWS SigV4 auth configuration for a model provider.
@@ -152,6 +157,12 @@ pub struct ModelProviderAwsAuthInfo {
 
 impl ModelProviderInfo {
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.temperature.is_some_and(|temperature| {
+            !temperature.is_finite() || !(0.0..=2.0).contains(&temperature)
+        }) {
+            return Err("provider temperature must be between 0 and 2".to_string());
+        }
+
         if self.aws.is_some() {
             if self.supports_websockets {
                 // TODO(celia-oai): Support AWS SigV4 signing for WebSocket
@@ -360,6 +371,8 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: true,
             supports_websockets: true,
+            temperature: None,
+            omit_tools_for_responses_compact: false,
         }
     }
 
@@ -390,6 +403,8 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            temperature: None,
+            omit_tools_for_responses_compact: false,
         }
     }
 
@@ -531,6 +546,8 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        temperature: None,
+        omit_tools_for_responses_compact: false,
     }
 }
 

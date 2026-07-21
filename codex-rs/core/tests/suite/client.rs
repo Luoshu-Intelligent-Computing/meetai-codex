@@ -1294,6 +1294,8 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        temperature: None,
+        omit_tools_for_responses_compact: false,
     };
 
     let codex_home = TempDir::new().unwrap();
@@ -2189,6 +2191,7 @@ async fn includes_configured_max_effort_in_request() -> anyhow::Result<()> {
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_reasoning_effort = Some(ReasoningEffort::Max);
+            config.model_provider.temperature = Some(0.0);
         })
         .build(&server)
         .await?;
@@ -2219,6 +2222,8 @@ async fn includes_configured_max_effort_in_request() -> anyhow::Result<()> {
             .and_then(|v| v.as_str()),
         Some("max")
     );
+    assert_eq!(request_body["temperature"].as_f64(), Some(0.0));
+    assert_eq!(request_body["tool_choice"].as_str(), Some("auto"));
 
     Ok(())
 }
@@ -2965,6 +2970,8 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        temperature: None,
+        omit_tools_for_responses_compact: false,
     };
 
     let codex_home = TempDir::new().unwrap();
@@ -3588,6 +3595,8 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        temperature: None,
+        omit_tools_for_responses_compact: false,
     };
 
     // Init session
@@ -3677,6 +3686,8 @@ async fn env_var_overrides_loaded_auth() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        temperature: None,
+        omit_tools_for_responses_compact: false,
     };
 
     // Init session

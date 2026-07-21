@@ -190,6 +190,8 @@ fn model_provider_from_proto(
         websocket_connect_timeout_ms: provider.websocket_connect_timeout_ms,
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
+        temperature: None,
+        omit_tools_for_responses_compact: false,
     };
     Ok((id, info))
 }
@@ -217,6 +219,8 @@ fn model_provider_to_proto(
         websocket_connect_timeout_ms,
         requires_openai_auth,
         supports_websockets,
+        temperature: _,
+        omit_tools_for_responses_compact: _,
     } = provider;
 
     proto::ModelProvider {
@@ -536,6 +540,8 @@ mod tests {
             websocket_connect_timeout_ms: Some(10_000),
             requires_openai_auth: false,
             supports_websockets: true,
+            temperature: None,
+            omit_tools_for_responses_compact: false,
             aws: None,
         }
     }
