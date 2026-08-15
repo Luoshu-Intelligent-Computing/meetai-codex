@@ -403,6 +403,7 @@ async fn handle_approved_mcp_tool_call(
     let server_origin = prepared_call.server_origin().map(str::to_string);
 
     let start = Instant::now();
+    prepared_call.register_progress(call_id, turn_context.sub_id.as_str(), call_id);
     let mut tool_input = arguments_value
         .clone()
         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
@@ -518,6 +519,7 @@ async fn handle_approved_mcp_tool_call(
         },
     ))
     .await;
+    prepared_call.unregister_progress(call_id);
     if let Err(error) = &result {
         tracing::warn!("MCP tool call error: {error:?}");
     }
@@ -1119,6 +1121,7 @@ const MCP_TOOL_UI_RESOURCE_URI_META_KEY: &str = "ui/resourceUri";
 const MCP_TOOL_LINK_ID_META_KEY: &str = "link_id";
 const MCP_TOOL_PLUGIN_ID_META_KEY: &str = "plugin_id";
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
+const MCP_TOOL_PROGRESS_TOKEN_META_KEY: &str = "progressToken";
 const MCP_TOOL_CONNECTED_ACCOUNT_EMAIL_META_KEY: &str = "connected_account_email";
 const MCP_TOOL_RESOURCE_URI_META_KEY: &str = "resource_uri";
 
@@ -1181,6 +1184,13 @@ fn build_mcp_tool_call_request_meta(
     let mut request_meta = serde_json::Map::new();
     request_meta.insert(
         "callId".to_string(),
+        serde_json::Value::String(call_id.to_string()),
+    );
+    // MCP servers use this token to associate notifications/progress with the
+    // active call. Reusing the app-server call identity keeps the bridge
+    // deterministic without exposing a second identifier to the UI.
+    request_meta.insert(
+        MCP_TOOL_PROGRESS_TOKEN_META_KEY.to_string(),
         serde_json::Value::String(call_id.to_string()),
     );
 

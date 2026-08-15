@@ -27,6 +27,7 @@ use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
 use crate::openai_docs_source_attribution::maybe_with_openai_docs_source_attribution;
 use crate::pagination::collect_paginated_with_limit;
+use crate::progress::McpProgressRouter;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::emit_duration;
 use crate::server::EffectiveMcpServer;
@@ -287,6 +288,7 @@ struct ManagedClientStartup {
     protocol_mode: McpProtocolMode,
     catalog_item_limit: usize,
     cancel_token: CancellationToken,
+    progress_router: Arc<McpProgressRouter>,
     startup_complete: Arc<AtomicBool>,
 }
 
@@ -309,6 +311,7 @@ impl ManagedClientStartup {
             protocol_mode,
             catalog_item_limit,
             cancel_token,
+            progress_router,
             startup_complete,
         } = self.clone();
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
@@ -360,6 +363,7 @@ impl ManagedClientStartup {
                         codex_apps_tools_cache_context,
                         tool_catalog_cache_context,
                         tool_catalog_fetch_ticket,
+                        progress_router,
                         client_elicitation_capability,
                         client_mcp_extensions,
                         catalog_item_limit,
@@ -417,6 +421,7 @@ impl AsyncManagedClient {
         keyring_backend_kind: AuthKeyringBackendKind,
         cancel_token: CancellationToken,
         tx_event: Option<Sender<Event>>,
+        progress_router: Arc<McpProgressRouter>,
         elicitation_requests: ElicitationRequestManager,
         codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
         tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
@@ -445,6 +450,7 @@ impl AsyncManagedClient {
             store_mode,
             keyring_backend_kind,
             tx_event,
+            progress_router,
             elicitation_requests,
             codex_apps_tools_cache_context: codex_apps_tools_cache_context.clone(),
             tool_catalog_cache_context: tool_catalog_cache_context.clone(),
@@ -872,6 +878,7 @@ async fn start_server_task(
         codex_apps_tools_cache_context,
         tool_catalog_cache_context,
         tool_catalog_fetch_ticket,
+        progress_router,
         client_elicitation_capability,
         client_mcp_extensions,
         catalog_item_limit,
@@ -879,10 +886,11 @@ async fn start_server_task(
     let params =
         mcp_initialize_request_params(client_elicitation_capability, client_mcp_extensions);
     let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
+    let send_progress = progress_router.callback();
 
     let started_at = Instant::now();
     let initialize_result = client
-        .initialize(params, startup_timeout, send_elicitation)
+        .initialize(params, startup_timeout, send_elicitation, send_progress)
         .await;
     record_protocol_discovery_metrics(
         client.protocol_mode(),
@@ -1048,6 +1056,7 @@ struct StartServerTaskParams {
     codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
     tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
     tool_catalog_fetch_ticket: Option<McpToolCatalogFetchTicket>,
+    progress_router: Arc<McpProgressRouter>,
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
     catalog_item_limit: usize,

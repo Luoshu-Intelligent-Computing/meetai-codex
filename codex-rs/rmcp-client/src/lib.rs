@@ -31,6 +31,7 @@ pub use event_notification_transport::EventNotificationReceiver;
 pub use http_client_adapter::StreamableHttpRedirectMode;
 pub use http_headers::with_http_headers_helper;
 pub use in_process_transport::InProcessTransportFactory;
+pub use logging_client_handler::SendProgress;
 pub use oauth::StoredOAuthCredentialSnapshot;
 pub use oauth::StoredOAuthTokens;
 pub use oauth::WrappedOAuthTokenResponse;

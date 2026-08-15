@@ -40,6 +40,7 @@ use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
+use codex_app_server_protocol::McpToolCallProgressNotification;
 use codex_app_server_protocol::ModelReroutedNotification;
 use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 use codex_app_server_protocol::ModelVerificationNotification;
@@ -898,6 +899,24 @@ pub(crate) async fn apply_bespoke_event_handling(
             // compatibility consumers.
             // App-server v2 receives TurnItem lifecycle instead, and dispatches dynamic tool
             // requests from DynamicToolCall starts.
+        }
+        EventMsg::McpToolCallProgress(progress) => {
+            let message = progress.message.unwrap_or_else(|| {
+                progress
+                    .total
+                    .map(|total| format!("Progress {:.0}/{:.0}", progress.progress, total))
+                    .unwrap_or_else(|| format!("Progress {:.0}", progress.progress))
+            });
+            outgoing
+                .send_server_notification(ServerNotification::McpToolCallProgress(
+                    McpToolCallProgressNotification {
+                        thread_id: conversation_id.to_string(),
+                        turn_id: event_turn_id,
+                        item_id: progress.call_id,
+                        message,
+                    },
+                ))
+                .await;
         }
         EventMsg::McpToolCallBegin(_) | EventMsg::McpToolCallEnd(_) => {
             // Deprecated MCP tool-call events are still fanned out for raw-event and rollout

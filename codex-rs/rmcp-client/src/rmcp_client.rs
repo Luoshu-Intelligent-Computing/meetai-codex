@@ -77,6 +77,7 @@ use crate::http_client_adapter::StreamableHttpClientAdapter;
 use crate::http_client_adapter::StreamableHttpClientAdapterError;
 use crate::http_client_adapter::StreamableHttpRedirectMode;
 use crate::in_process_transport::InProcessTransportFactory;
+use crate::logging_client_handler::SendProgress;
 use crate::oauth::OAuthPersistor;
 use crate::oauth::ResolvedOAuthCredentialStore;
 use crate::oauth::ResolvedOAuthTokens;
@@ -571,10 +572,12 @@ impl RmcpClient {
         params: InitializeRequestParams,
         timeout: Option<Duration>,
         send_elicitation: SendElicitation,
+        send_progress: Option<SendProgress>,
     ) -> Result<ServerPeerInfo> {
         let client_service = ElicitationClientService::new(
             params.clone(),
             send_elicitation,
+            send_progress,
             self.elicitation_pause_state.clone(),
         );
         let pending_transport = {
