@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
+use crate::progress::McpProgressRouter;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
@@ -161,6 +162,7 @@ impl fmt::Debug for McpBinding {
 #[derive(Clone)]
 pub struct PreparedMcpCall {
     _connections: Arc<McpConnectionSet>,
+    progress_router: Arc<McpProgressRouter>,
     client: Arc<ManagedClient>,
     config: Arc<McpConfig>,
     catalog_revision: u64,
@@ -189,8 +191,10 @@ impl PreparedMcpCall {
         selected_plugin_server: bool,
     ) -> Self {
         let server_name = tool_info.server_name.clone();
+        let progress_router = connections.progress_router();
         Self {
             _connections: connections,
+            progress_router,
             client,
             config,
             catalog_revision,
@@ -242,6 +246,14 @@ impl PreparedMcpCall {
 
     pub fn is_selected_plugin_server(&self) -> bool {
         self.selected_plugin_server
+    }
+
+    pub fn register_progress(&self, token: &str, event_id: &str, call_id: &str) {
+        self.progress_router.register(token, event_id, call_id);
+    }
+
+    pub fn unregister_progress(&self, token: &str) {
+        self.progress_router.unregister(token);
     }
 
     pub async fn server_supports_sandbox_state_meta_capability(&self) -> Result<bool> {

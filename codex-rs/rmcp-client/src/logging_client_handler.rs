@@ -22,17 +22,27 @@ use tracing::warn;
 use crate::rmcp_client::Elicitation;
 use crate::rmcp_client::SendElicitation;
 
+/// Receives MCP server progress notifications without coupling rmcp-client to
+/// Codex core or app-server event types.
+pub type SendProgress = Arc<dyn Fn(ProgressNotificationParam) + Send + Sync>;
+
 #[derive(Clone)]
 pub(crate) struct LoggingClientHandler {
     client_info: ClientInfo,
     send_elicitation: Arc<SendElicitation>,
+    send_progress: Option<SendProgress>,
 }
 
 impl LoggingClientHandler {
-    pub(crate) fn new(client_info: ClientInfo, send_elicitation: SendElicitation) -> Self {
+    pub(crate) fn new(
+        client_info: ClientInfo,
+        send_elicitation: SendElicitation,
+        send_progress: Option<SendProgress>,
+    ) -> Self {
         Self {
             client_info,
             send_elicitation: Arc::new(send_elicitation),
+            send_progress,
         }
     }
 }
@@ -65,6 +75,9 @@ impl ClientHandler for LoggingClientHandler {
         params: ProgressNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) {
+        if let Some(send_progress) = &self.send_progress {
+            send_progress(params.clone());
+        }
         info!(
             "MCP server progress notification (token: {:?}, progress: {}, total: {:?}, message: {:?})",
             params.progress_token, params.progress, params.total, params.message

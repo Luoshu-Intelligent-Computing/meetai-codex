@@ -358,6 +358,9 @@ impl ThreadHistoryBuilder {
             }
             EventMsg::McpToolCallBegin(payload) => self.handle_mcp_tool_call_begin(payload),
             EventMsg::McpToolCallEnd(payload) => self.handle_mcp_tool_call_end(payload),
+            EventMsg::McpToolCallProgress(_) => {
+                // Progress is ephemeral and must not be persisted or replayed.
+            }
             EventMsg::ViewImageToolCall(payload) => self.handle_view_image_tool_call(payload),
             EventMsg::ImageGenerationBegin(payload) => self.handle_image_generation_begin(payload),
             EventMsg::ImageGenerationEnd(payload) => self.handle_image_generation_end(payload),
@@ -1659,6 +1662,7 @@ mod tests {
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::McpToolCallEndEvent;
+    use codex_protocol::protocol::McpToolCallProgressEvent;
     use codex_protocol::protocol::PatchApplyBeginEvent;
     use codex_protocol::protocol::ReviewTarget;
     use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -1676,6 +1680,19 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[test]
+    fn mcp_tool_call_progress_is_not_persisted_in_thread_history() {
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_event(&EventMsg::McpToolCallProgress(McpToolCallProgressEvent {
+            call_id: "call-1".into(),
+            progress: 1.0,
+            total: Some(2.0),
+            message: Some("reading".into()),
+        }));
+
+        assert!(builder.finish().is_empty());
+    }
 
     #[test]
     fn builds_multiple_turns_with_reasoning_items() {

@@ -35,6 +35,7 @@ use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
 use crate::pagination::MAX_CODEX_APPS_TOOL_CATALOG_ITEMS;
 use crate::pagination::MAX_MCP_CATALOG_ITEMS;
+use crate::progress::McpProgressRouter;
 use crate::rmcp_client::AsyncManagedClient;
 use crate::rmcp_client::DEFAULT_TOOL_TIMEOUT;
 use crate::rmcp_client::ManagedClient;
@@ -188,6 +189,7 @@ pub(crate) struct McpConnectionSet {
     prefix_mcp_tool_names: bool,
     non_prefixed_mcp_tool_servers: Vec<String>,
     elicitation_requests: ElicitationRequestManager,
+    progress_router: Arc<McpProgressRouter>,
 }
 
 impl McpConnectionSet {
@@ -228,6 +230,7 @@ impl McpConnectionSet {
         let protocol_mode = config.protocol_mode;
         let client_elicitation_capability = config.client_elicitation_capability.clone();
         let tool_plugin_provenance = crate::mcp::tool_plugin_provenance(&config);
+        let progress_router = Arc::new(McpProgressRouter::new(tx_event.clone()));
         let auth = auth.as_ref();
         let mut servers = HashMap::new();
         let mut required_servers = mcp_servers
@@ -481,6 +484,7 @@ impl McpConnectionSet {
                 keyring_backend_kind,
                 cancel_token.clone(),
                 tx_event.clone(),
+                progress_router.clone(),
                 elicitation_requests.clone(),
                 codex_apps_tools_cache_context,
                 tool_catalog_cache_context,
@@ -650,6 +654,7 @@ impl McpConnectionSet {
             prefix_mcp_tool_names,
             non_prefixed_mcp_tool_servers,
             elicitation_requests: elicitation_requests.clone(),
+            progress_router,
         };
         let summary_publication_gate = publication_gate;
         tokio::spawn(async move {
@@ -715,11 +720,16 @@ impl McpConnectionSet {
                 /*lifecycle*/ None,
                 ElicitationRequestRouter::default(),
             ),
+            progress_router: Arc::new(McpProgressRouter::new(None)),
         }
     }
 
     pub fn has_servers(&self) -> bool {
         !self.servers.is_empty()
+    }
+
+    pub(crate) fn progress_router(&self) -> Arc<McpProgressRouter> {
+        Arc::clone(&self.progress_router)
     }
 
     pub(crate) fn contains_server(&self, server_name: &str) -> bool {

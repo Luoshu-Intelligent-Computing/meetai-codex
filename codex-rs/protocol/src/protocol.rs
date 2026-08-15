@@ -1384,6 +1384,9 @@ pub enum EventMsg {
 
     McpToolCallEnd(McpToolCallEndEvent),
 
+    /// Ephemeral progress from an MCP server; not persisted or replayed.
+    McpToolCallProgress(McpToolCallProgressEvent),
+
     WebSearchBegin(WebSearchBeginEvent),
 
     WebSearchEnd(WebSearchEndEvent),
@@ -2481,6 +2484,22 @@ pub struct McpToolCallEndEvent {
     pub duration: Duration,
     /// Result of the tool call. Note this could be an error.
     pub result: Result<CallToolResult, String>,
+}
+
+/// Ephemeral progress reported by an MCP server while a tool call is running.
+/// Consumers may update the current MCP tool presentation with this event,
+/// but it must not create a second transcript item or be replayed as history.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
+pub struct McpToolCallProgressEvent {
+    /// Identifier for the corresponding McpToolCallBegin event.
+    pub call_id: String,
+    pub progress: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
