@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rmcp::ClientHandler;
 use rmcp::RoleClient;
 use rmcp::model::ClientInfo;
 use rmcp::model::ClientResult;
@@ -8,6 +9,7 @@ use rmcp::model::CustomResult;
 use rmcp::model::ElicitResult;
 use rmcp::model::ElicitationAction;
 use rmcp::model::MetaObject;
+use rmcp::model::ProgressNotificationParam;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::RequestMetaObject;
 use rmcp::model::RequestParamsMeta;
@@ -29,6 +31,7 @@ use crate::rmcp_client::ElicitationResponse;
 use crate::rmcp_client::SendElicitation;
 
 const MCP_PROGRESS_TOKEN_META_KEY: &str = "progressToken";
+const MCP_PROGRESS_NOTIFICATION_METHOD: &str = "notifications/progress";
 const MCP_ELICITATION_CREATE_METHOD: &str = "elicitation/create";
 const OPENAI_FORM_METHOD: &str = "openai/form";
 
@@ -163,12 +166,32 @@ impl Service<RoleClient> for ElicitationClientService {
         notification: ServerNotification,
         context: NotificationContext<RoleClient>,
     ) -> Result<(), rmcp::ErrorData> {
-        <LoggingClientHandler as Service<RoleClient>>::handle_notification(
-            &self.handler,
-            notification,
-            context,
-        )
-        .await
+        match notification {
+            ServerNotification::CustomNotification(notification)
+                if notification.method == MCP_PROGRESS_NOTIFICATION_METHOD =>
+            {
+                let params = notification
+                    .params
+                    .ok_or_else(|| rmcp::ErrorData::invalid_params("missing params", None))?;
+                let params: ProgressNotificationParam = serde_json::from_value(params)
+                    .map_err(|err| rmcp::ErrorData::invalid_params(err.to_string(), None))?;
+                <LoggingClientHandler as ClientHandler>::on_progress(
+                    &self.handler,
+                    params,
+                    context,
+                )
+                .await;
+                Ok(())
+            }
+            notification => {
+                <LoggingClientHandler as Service<RoleClient>>::handle_notification(
+                    &self.handler,
+                    notification,
+                    context,
+                )
+                .await
+            }
+        }
     }
 
     fn get_info(&self) -> ClientInfo {

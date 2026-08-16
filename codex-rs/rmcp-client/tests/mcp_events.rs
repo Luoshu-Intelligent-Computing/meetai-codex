@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use streamable_http_test_support::create_client;
+use streamable_http_test_support::create_client_with_progress;
 
 struct StreamClosed {
     event_name: String,
@@ -182,6 +183,134 @@ async fn plugin_runtime_event_streams_are_isolated_and_cancel_locally() -> anyho
         .await?
         .context("cancelled stream did not close")?;
     assert_eq!(closed, "gmail.message.received");
+
+    client.shutdown().await;
+    server.abort();
+    let _ = server.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamable_http_progress_notifications_reach_callback_before_tool_result()
+-> anyhow::Result<()> {
+    let router = Router::new().route(
+        "/mcp",
+        post(|Json(message): Json<Value>| async move {
+            match message["method"].as_str() {
+                Some("initialize") => initialize_response(&message),
+                Some("notifications/initialized") => StatusCode::ACCEPTED.into_response(),
+                Some("tools/call") => {
+                    let progress_token = message["params"]["_meta"]["progressToken"].clone();
+                    assert!(progress_token.is_number());
+                    let events = stream::iter(
+                        [
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": {
+                                    "progressToken": progress_token,
+                                    "progress": 1.0,
+                                    "total": 2.0,
+                                    "message": "first"
+                                }
+                            }),
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": {
+                                    "progressToken": progress_token,
+                                    "progress": 2.0,
+                                    "total": 2.0,
+                                    "message": "second"
+                                }
+                            }),
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": message["id"],
+                                "result": {
+                                    "content": [],
+                                    "structuredContent": {"ok": true}
+                                }
+                            }),
+                        ]
+                        .into_iter()
+                        .map(|payload| {
+                            Ok::<_, Infallible>(
+                                Event::default().event("message").data(payload.to_string()),
+                            )
+                        }),
+                    );
+                    Sse::new(events).into_response()
+                }
+                method => panic!("unexpected progress test request: {method:?}"),
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let client = create_client_with_progress(
+        &base_url,
+        std::sync::Arc::new(move |progress| {
+            let _ = progress_tx.send(progress);
+        }),
+    )
+    .await?;
+    let (bound_tx, mut bound_rx) = mpsc::unbounded_channel();
+
+    let result = client
+        .call_tool_with_progress(
+            "echo".to_string(),
+            Some(json!({"message": "progress"})),
+            Some(json!({"progressToken": "call-1"})),
+            Some(Duration::from_secs(5)),
+            Some(std::sync::Arc::new(move |token| {
+                let _ = bound_tx.send(token);
+            })),
+        )
+        .await
+        .context("tool call did not complete")?;
+    let bound_token = timeout(Duration::from_secs(5), bound_rx.recv())
+        .await
+        .context("generated progress token binding timed out")?
+        .context("generated progress token was not bound")?;
+    let first = timeout(Duration::from_secs(5), progress_rx.recv())
+        .await
+        .context("first progress notification timed out")?
+        .context("first progress notification was not delivered")?;
+    let second = timeout(Duration::from_secs(5), progress_rx.recv())
+        .await
+        .context("second progress notification timed out")?
+        .context("second progress notification was not delivered")?;
+
+    assert_eq!(
+        [
+            (
+                first.progress_token.0.to_string(),
+                first.progress,
+                first.total,
+                first.message,
+            ),
+            (
+                second.progress_token.0.to_string(),
+                second.progress,
+                second.total,
+                second.message,
+            ),
+        ],
+        [
+            (
+                bound_token.clone(),
+                1.0,
+                Some(2.0),
+                Some("first".to_string())
+            ),
+            (bound_token, 2.0, Some(2.0), Some("second".to_string())),
+        ]
+    );
+    assert_eq!(result.structured_content, Some(json!({"ok": true})));
 
     client.shutdown().await;
     server.abort();

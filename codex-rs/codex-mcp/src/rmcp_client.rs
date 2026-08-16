@@ -890,7 +890,7 @@ async fn start_server_task(
 
     let started_at = Instant::now();
     let initialize_result = client
-        .initialize(params, startup_timeout, send_elicitation, send_progress)
+        .initialize_with_progress(params, startup_timeout, send_elicitation, send_progress)
         .await;
     record_protocol_discovery_metrics(
         client.protocol_mode(),

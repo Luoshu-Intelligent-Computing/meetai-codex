@@ -388,7 +388,6 @@ async fn legacy_tool_catalog_does_not_follow_pagination_cursor() -> anyhow::Resu
             .with_protocol_version(ProtocolVersion::V_2025_06_18),
             Some(Duration::from_secs(5)),
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
-            None,
         )
         .await?;
 
@@ -505,7 +504,6 @@ async fn create_test_manager_with_ready_apps_client(
             .with_protocol_version(ProtocolVersion::V_2025_06_18),
             Some(Duration::from_secs(5)),
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
-            None,
         )
         .await?;
 
@@ -4143,7 +4141,6 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
                 }
                 .boxed()
             }),
-            None,
         )
         .await?;
     let initial_tools = list_tools_for_client_uncached(
@@ -4640,7 +4637,6 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
             .with_protocol_version(ProtocolVersion::V_2025_06_18),
             /*timeout*/ None,
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
-            None,
         )
         .await?;
     let view = previous

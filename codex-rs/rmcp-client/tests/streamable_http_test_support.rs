@@ -28,6 +28,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use codex_rmcp_client::RmcpClient;
+use codex_rmcp_client::SendProgress;
 use codex_utils_cargo_bin::CargoBinError;
 use futures::FutureExt as _;
 use pretty_assertions::assert_eq;
@@ -86,6 +87,26 @@ pub(crate) async fn create_client_with_http_client(
     base_url: &str,
     http_client: Arc<dyn HttpClient>,
 ) -> anyhow::Result<RmcpClient> {
+    create_client_with_http_client_and_progress(base_url, http_client, None).await
+}
+
+pub(crate) async fn create_client_with_progress(
+    base_url: &str,
+    send_progress: SendProgress,
+) -> anyhow::Result<RmcpClient> {
+    create_client_with_http_client_and_progress(
+        base_url,
+        Environment::default_for_tests().get_http_client(),
+        Some(send_progress),
+    )
+    .await
+}
+
+async fn create_client_with_http_client_and_progress(
+    base_url: &str,
+    http_client: Arc<dyn HttpClient>,
+    send_progress: Option<SendProgress>,
+) -> anyhow::Result<RmcpClient> {
     let client = RmcpClient::new_streamable_http_client(
         "test-streamable-http",
         &format!("{base_url}/mcp"),
@@ -99,14 +120,21 @@ pub(crate) async fn create_client_with_http_client(
     )
     .await?;
 
-    initialize_client(&client).await?;
+    initialize_client_with_progress(&client, send_progress).await?;
 
     Ok(client)
 }
 
 pub(crate) async fn initialize_client(client: &RmcpClient) -> anyhow::Result<()> {
+    initialize_client_with_progress(client, None).await
+}
+
+async fn initialize_client_with_progress(
+    client: &RmcpClient,
+    send_progress: Option<SendProgress>,
+) -> anyhow::Result<()> {
     client
-        .initialize(
+        .initialize_with_progress(
             init_params(),
             Some(Duration::from_secs(5)),
             Box::new(|_, _| {
@@ -119,6 +147,7 @@ pub(crate) async fn initialize_client(client: &RmcpClient) -> anyhow::Result<()>
                 }
                 .boxed()
             }),
+            send_progress,
         )
         .await?;
     Ok(())
