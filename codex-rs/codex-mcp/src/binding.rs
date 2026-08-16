@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_config::AppToolApproval;
 use codex_protocol::mcp::CallToolResult;
+use codex_rmcp_client::BindProgressToken;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
@@ -289,10 +290,27 @@ impl PreparedMcpCall {
             ));
         }
         let (arguments, meta) = prepare().await?;
+        let bind_progress_token = meta
+            .as_ref()
+            .and_then(|meta| meta.get("callId"))
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .map(|call_id| {
+                let progress_router = Arc::clone(&self.progress_router);
+                Arc::new(move |generated_token: String| {
+                    progress_router.bind(&call_id, &generated_token);
+                }) as BindProgressToken
+            });
         let result = self
             .client
             .client
-            .call_tool(tool_name.clone(), arguments, meta, self.client.tool_timeout)
+            .call_tool_with_progress(
+                tool_name.clone(),
+                arguments,
+                meta,
+                self.client.tool_timeout,
+                bind_progress_token,
+            )
             .await
             .with_context(|| format!("tool call failed for `{}/{tool_name}`", self.server_name))?;
         drop(current_revision);

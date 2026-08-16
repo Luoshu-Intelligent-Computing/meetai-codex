@@ -45,6 +45,7 @@ pub use perform_oauth_login::perform_oauth_login_return_url;
 pub use perform_oauth_login::perform_oauth_login_silent;
 pub use protocol_mode::McpProtocolMode;
 pub use rmcp::model::ElicitationAction;
+pub use rmcp_client::BindProgressToken;
 pub use rmcp_client::CancellableEventStreamRequest;
 pub use rmcp_client::Elicitation;
 pub use rmcp_client::ElicitationResponse;

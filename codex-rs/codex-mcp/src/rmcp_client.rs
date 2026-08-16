@@ -888,7 +888,7 @@ async fn start_server_task(
     let send_progress = progress_router.callback();
 
     let initialize_result = client
-        .initialize(params, startup_timeout, send_elicitation, send_progress)
+        .initialize_with_progress(params, startup_timeout, send_elicitation, send_progress)
         .await
         .map_err(StartupOutcomeError::from)?;
 
