@@ -111,8 +111,10 @@ pub(super) async fn search_threads(
     let mut remaining_rollouts = matching_rollouts;
 
     loop {
+        // Content matches come from rollout files. Passing SQLite here would let its
+        // metadata-filtered page hide filesystem hits that are not indexed yet.
         let page = list_rollout_threads(
-            state_db.clone(),
+            None,
             &rollout_config,
             store.config.default_model_provider_id.as_str(),
             &scan_params,

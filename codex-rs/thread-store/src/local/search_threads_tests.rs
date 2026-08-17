@@ -1,4 +1,5 @@
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
 use codex_rollout::RolloutConfig;
 use codex_rollout::ThreadItem;
 use pretty_assertions::assert_eq;
@@ -61,7 +62,7 @@ async fn content_search_finds_rollouts_not_yet_indexed_in_state_db() {
             cursor: None,
             sort_key: ThreadSortKey::RecencyAt,
             sort_direction: SortDirection::Desc,
-            allowed_sources: Vec::new(),
+            allowed_sources: vec![SessionSource::Cli],
             archived: false,
             search_term: "Hello from user".to_string(),
         },
