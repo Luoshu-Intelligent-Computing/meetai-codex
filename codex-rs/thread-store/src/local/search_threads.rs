@@ -103,7 +103,10 @@ pub(super) async fn search_threads(
         archived: params.archived,
         search_term: None,
         relation_filter: None,
-        use_state_db_only: state_db.is_some(),
+        // Content search is grounded in rollout files. A state DB may exist before
+        // a rollout has been indexed, so restricting this scan to SQLite can hide
+        // valid ripgrep matches. SQLite still enriches names and section metadata.
+        use_state_db_only: false,
     };
     let mut remaining_rollouts = matching_rollouts;
 
