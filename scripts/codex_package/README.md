@@ -31,8 +31,9 @@ artifacts; pass a GNU Linux target explicitly for native glibc local builds. If
 prints its path after the package is built.
 
 The `--variant` flag selects the package entrypoint. Supported variants are
-`codex` and `codex-app-server`. The `version` field in `codex-package.json` is
-read from `[workspace.package].version` in `codex-rs/Cargo.toml`.
+`codex` and `codex-app-server`. The `--package-version` flag sets the version in
+`codex-package.json`; it defaults to `[workspace.package].version` in
+`codex-rs/Cargo.toml`.
 
 ## Source-built artifacts
 
@@ -78,6 +79,6 @@ The patched zsh fork used by `shell_zsh_fork` is fetched from the DotSlash
 manifest at `scripts/codex_package/codex-zsh` when the selected target has a
 matching prebuilt artifact. Downloaded archives are cached under
 `$TMPDIR/codex-package/<target>-zsh` and installed at
-`codex-resources/zsh/bin/zsh`. Pass `--zsh-manifest` to use a different
-DotSlash manifest, such as the manifest published with a standalone zsh
-artifact release.
+`codex-resources/zsh/bin/zsh`. Pass `--zsh-bin` to package a prebuilt, signed
+executable, or `--zsh-manifest` to use a different DotSlash manifest, such as
+the manifest published with a standalone zsh artifact release.

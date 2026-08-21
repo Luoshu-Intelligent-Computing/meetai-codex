@@ -316,6 +316,7 @@ async fn queued_bang_shell_waits_for_user_shell_completion_before_next_input() {
     assert_eq!(next_add_to_history_event(&mut rx), "!echo hi");
     assert_eq!(chat.input_queue.queued_user_messages.len(), 1);
 
+    handle_turn_started(&mut chat, "turn-2");
     let begin = begin_exec_with_source(
         &mut chat,
         "user-shell-echo",
@@ -323,6 +324,7 @@ async fn queued_bang_shell_waits_for_user_shell_completion_before_next_input() {
         ExecCommandSource::UserShell,
     );
     end_exec(&mut chat, begin, "hi\n", "", /*exit_code*/ 0);
+    handle_turn_completed(&mut chat, "turn-2", /*duration_ms*/ None);
 
     match next_submit_op(&mut op_rx) {
         Op::UserTurn { items, .. } => assert_eq!(
@@ -401,7 +403,7 @@ async fn queued_slash_menu_cancel_drains_next_input() {
 async fn queued_settings_selection_applies_before_next_input() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.thread_id = Some(ThreadId::new());
-    let mut preset = get_available_model(&chat, "gpt-5.4");
+    let mut preset = get_available_model(&chat, "gpt-5.6-terra");
     preset.supported_reasoning_efforts.truncate(1);
     let selected_effort = preset.supported_reasoning_efforts[0].effort.clone();
     chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![preset]));
@@ -439,7 +441,7 @@ async fn queued_settings_selection_applies_before_next_input() {
     match next_submit_op(&mut op_rx) {
         Op::UserTurn { model, effort, .. } => assert_eq!(
             (model, effort),
-            ("gpt-5.4".to_string(), Some(selected_effort))
+            ("gpt-5.6-terra".to_string(), Some(selected_effort))
         ),
         other => panic!("expected queued message with updated model, got {other:?}"),
     }
@@ -539,9 +541,19 @@ async fn queued_inline_rename_does_not_drain_again_before_turn_started() {
     );
     let input_state = chat.capture_thread_input_state().unwrap();
     assert!(input_state.user_turn_pending_start);
-    chat.restore_thread_input_state(/*input_state*/ None);
+    chat.restore_thread_input_state(
+        /*input_state*/ None,
+        ThreadInputStateRestoreMode {
+            preserve_in_flight_turn: true,
+        },
+    );
     assert!(!chat.input_queue.user_turn_pending_start);
-    chat.restore_thread_input_state(Some(input_state));
+    chat.restore_thread_input_state(
+        Some(input_state),
+        ThreadInputStateRestoreMode {
+            preserve_in_flight_turn: true,
+        },
+    );
     assert!(chat.input_queue.user_turn_pending_start);
     assert_eq!(
         chat.queued_user_message_texts(),
@@ -987,7 +999,12 @@ async fn restored_queued_goal_slash_command_emits_set_goal_event() {
     let (mut restored_chat, mut restored_rx, mut restored_op_rx) =
         make_chatwidget_manual(/*model_override*/ None).await;
     restored_chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
-    restored_chat.restore_thread_input_state(Some(input_state));
+    restored_chat.restore_thread_input_state(
+        Some(input_state),
+        ThreadInputStateRestoreMode {
+            preserve_in_flight_turn: true,
+        },
+    );
     let thread_id = ThreadId::new();
     restored_chat.thread_id = Some(thread_id);
     restored_chat.maybe_send_next_queued_input();
@@ -1293,8 +1310,10 @@ async fn usage_command_runs_with_backend_auth_without_chatgpt_account_flag() {
 #[tokio::test]
 async fn usage_command_runs_with_backend_auth_from_widget_init() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual_with_auth(
-        /*model_override*/ None, /*has_chatgpt_account*/ false,
+        /*model_override*/ None,
+        /*has_chatgpt_account*/ false,
         /*has_codex_backend_auth*/ true,
+        FrameRequester::test_dummy(),
     )
     .await;
 
@@ -1739,6 +1758,40 @@ async fn slash_copy_reports_when_no_agent_response_exists() {
 }
 
 #[tokio::test]
+async fn slash_export_opens_destination_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.thread_id = Some(
+        ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread ID"),
+    );
+    handle_turn_started(&mut chat, "turn-1");
+    queue_composer_text_with_tab(&mut chat, "/export");
+    complete_turn_with_message(&mut chat, "turn-1", /*message*/ None);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("slash_export_destination_picker", popup);
+    chat.show_transcript_export_file_prompt();
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("slash_export_filename_prompt", popup);
+
+    let statuses = "Saved conversation to conversation.md\nCopied conversation to clipboard";
+    for message in statuses.lines() {
+        chat.add_info_message(message.into(), /*hint*/ None);
+    }
+    chat.add_error_message("Copy failed: clipboard unavailable".to_string());
+    chat.add_error_message("Export failed: missing parent".to_string());
+    let cells = drain_insert_history(&mut rx);
+    assert_chatwidget_snapshot!(
+        "slash_export_completion_message",
+        cells
+            .iter()
+            .map(|cell| lines_to_single_string(cell).trim().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+#[tokio::test]
 async fn ctrl_o_copy_reports_when_no_agent_response_exists() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -1761,6 +1814,7 @@ async fn keymap_capture_can_capture_current_copy_shortcut() {
         "composer".to_string(),
         "submit".to_string(),
         crate::app_event::KeymapEditIntent::ReplaceAll,
+        crate::app_event::KeymapCaptureMode::SingleKey,
         &runtime_keymap,
     );
 
@@ -1795,6 +1849,7 @@ async fn slash_keymap_capture_can_capture_app_shortcuts() {
             "global".to_string(),
             "open_transcript".to_string(),
             crate::app_event::KeymapEditIntent::ReplaceAll,
+            crate::app_event::KeymapCaptureMode::SingleKey,
             &runtime_keymap,
         );
 
@@ -2057,62 +2112,6 @@ async fn queued_menu_slash_keeps_agent_turn_complete_notification() {
 }
 
 #[tokio::test]
-async fn slash_copy_uses_latest_surviving_response_after_rollback() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    replay_user_message_text(&mut chat, "user-1", "foo", ReplayKind::ThreadSnapshot);
-    replay_agent_message(
-        &mut chat,
-        "agent-1",
-        "foo response",
-        ReplayKind::ThreadSnapshot,
-    );
-    replay_user_message_text(&mut chat, "user-2", "bar", ReplayKind::ThreadSnapshot);
-    replay_agent_message(
-        &mut chat,
-        "agent-2",
-        "bar response",
-        ReplayKind::ThreadSnapshot,
-    );
-    let _ = drain_insert_history(&mut rx);
-    assert_eq!(chat.last_agent_markdown_text(), Some("bar response"));
-
-    chat.truncate_agent_copy_history_to_user_turn_count(/*user_turn_count*/ 1);
-
-    assert_eq!(chat.last_agent_markdown_text(), Some("foo response"));
-    chat.copy_last_agent_markdown_with(|markdown| {
-        assert_eq!(markdown, "foo response");
-        Ok(None)
-    });
-}
-
-#[tokio::test]
-async fn slash_copy_reports_when_rewind_exceeds_retained_copy_history() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    replay_user_message_text(&mut chat, "user-1", "foo", ReplayKind::ThreadSnapshot);
-    replay_agent_message(
-        &mut chat,
-        "agent-1",
-        "foo response",
-        ReplayKind::ThreadSnapshot,
-    );
-    let _ = drain_insert_history(&mut rx);
-
-    chat.truncate_agent_copy_history_to_user_turn_count(/*user_turn_count*/ 0);
-    chat.dispatch_command(SlashCommand::Copy);
-
-    let cells = drain_insert_history(&mut rx);
-    let rendered = lines_to_single_string(&cells[0]);
-    assert!(
-        rendered.contains(
-            "Cannot copy that response after rewinding. Only the most recent 32 responses are available to /copy."
-        ),
-        "expected evicted-history message, got {rendered:?}"
-    );
-}
-
-#[tokio::test]
 async fn slash_exit_requests_exit() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -2143,7 +2142,39 @@ async fn slash_clear_requests_ui_clear_when_idle() {
 
     chat.dispatch_command(SlashCommand::Clear);
 
-    assert_matches!(rx.try_recv(), Ok(AppEvent::ClearUi));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ClearUi { name: None }));
+}
+
+#[tokio::test]
+async fn slash_new_with_name_requests_named_session() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.bottom_pane
+        .set_composer_text("/new   Add User  ".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::NewSession {
+            name: Some(name)
+        }) if name == "Add User"
+    );
+}
+
+#[tokio::test]
+async fn slash_clear_with_name_requests_named_session() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.bottom_pane
+        .set_composer_text("/clear   Add User  ".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ClearUi {
+            name: Some(name)
+        }) if name == "Add User"
+    );
 }
 
 #[tokio::test]
@@ -2169,7 +2200,7 @@ async fn slash_clear_after_ctrl_c_keeps_stashed_draft_recallable() {
         .set_composer_text("/clear".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert_matches!(rx.try_recv(), Ok(AppEvent::ClearUi));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ClearUi { name: None }));
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(chat.bottom_pane.composer_text(), stashed_draft);
 
@@ -2552,7 +2583,26 @@ async fn slash_fork_requests_current_fork() {
 
     chat.dispatch_command(SlashCommand::Fork);
 
-    assert_matches!(rx.try_recv(), Ok(AppEvent::ForkCurrentSession));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ForkCurrentSession { name: None })
+    );
+}
+
+#[tokio::test]
+async fn slash_fork_with_name_requests_named_fork() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.bottom_pane
+        .set_composer_text("/fork   Add User  ".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ForkCurrentSession {
+            name: Some(name)
+        }) if name == "Add User"
+    );
 }
 
 #[tokio::test]
@@ -2583,6 +2633,109 @@ async fn slash_app_without_thread_id_shows_starting_error() {
         "slash_app_without_thread_id_shows_starting_error",
         lines_to_single_string(&cells[0])
     );
+}
+
+#[tokio::test]
+async fn slash_pwd_and_cwd_alias_display_current_working_directory_from_composer() {
+    let mut output = Vec::new();
+    for (command, side) in [("/pwd", false), ("/cwd", true), ("/pwd x", false)] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.set_side_conversation_active(side);
+        chat.bottom_pane.set_task_running(!side);
+        chat.bottom_pane
+            .set_composer_text(command.to_string(), Vec::new(), Vec::new());
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+        let [cell]: [_; 1] = drain_insert_history(&mut rx).try_into().expect("one cell");
+        output.push(normalize_snapshot_paths(lines_to_single_string(&cell)));
+    }
+    insta::assert_snapshot!(output.join(""), @r"
+• Current working directory: /tmp/project
+• Current working directory: /tmp/project
+■ Usage: /pwd
+");
+}
+
+#[tokio::test]
+async fn slash_cd_changes_current_session_after_replay_and_defaults_to_home() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.thread_name = Some("Completed task".to_string());
+    chat.forked_from = Some(ThreadId::new());
+    let (status, duration, error) = (AppServerTurnStatus::Completed, None, None);
+    let turn = app_server_turn("turn-1", status, duration, error);
+    chat.replay_thread_turns(vec![turn], ReplayKind::ResumeInitialMessages);
+    drain_insert_history(&mut rx);
+    assert!(!chat.can_change_working_directory(ThreadId::new()));
+    let drain = chat.submit_queued_slash_prompt(UserMessage::from("/cd /tmp").into());
+    assert_eq!(drain, QueueDrain::Stop);
+    chat.bottom_pane
+        .set_composer_text("/cd".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    for expected in ["/tmp", "~"] {
+        assert_matches!(
+            rx.try_recv(),
+            Ok(AppEvent::ChangeWorkingDirectory { thread_id: actual, requested_cwd })
+                if actual == thread_id && requested_cwd == std::path::Path::new(expected)
+        );
+    }
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn rejected_queued_cd_drains_following_input() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    handle_turn_started(&mut chat, "turn-1");
+    queue_composer_text_with_tab(&mut chat, "/cd /tmp");
+    queue_composer_text_with_tab(&mut chat, "follow-up");
+    complete_turn_with_message(&mut chat, "turn-1", /*message*/ None);
+    assert_matches!(next_submit_op(&mut op_rx), Op::UserTurn { .. });
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(event, AppEvent::ChangeWorkingDirectory { .. }));
+    }
+}
+
+#[tokio::test]
+async fn slash_cd_rejects_pending_input_and_unsupported_session_ownership() {
+    let mut errors = Vec::new();
+    for state in "new active pending queued steer side owned ephemeral mcp exec".split(' ') {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.thread_id = (state != "new").then(ThreadId::new);
+        let (queued, steer) = (UserMessage::from("q").into(), pending_steer("s"));
+        match state {
+            "active" => chat.bottom_pane.set_task_running(/*running*/ true),
+            "pending" => chat.input_queue.user_turn_pending_start = true,
+            "queued" => chat.input_queue.queued_user_messages.push_back(queued),
+            "steer" => chat.input_queue.pending_steers.push_back(steer),
+            "side" => chat.set_side_conversation_active(/*active*/ true),
+            "owned" => chat.set_parent_owned_thread(),
+            "ephemeral" => chat.config.ephemeral = true,
+            "exec" => chat.track_unified_exec_process_begin("call", Some("process"), "sleep"),
+            "mcp" => {
+                let cell =
+                    history_cell::new_mcp_inventory_loading(/*animations_enabled*/ false);
+                chat.transcript.active_cell = Some(Box::new(cell));
+            }
+            _ => {}
+        }
+
+        chat.dispatch_command_with_args(SlashCommand::Cd, "/tmp".to_string(), Vec::new());
+
+        assert!(state != "mcp" || chat.transcript.active_cell.is_some());
+        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+        let Ok(AppEvent::InsertHistoryCell(cell)) = rx.try_recv() else {
+            unreachable!("missing error for {state}");
+        };
+        errors.push(lines_to_single_string(&cell.display_lines(/*width*/ 200)));
+        assert!(rx.try_recv().is_err(), "{state}");
+    }
+    insta::assert_snapshot!(format!("{}{}", errors[0], errors[3]), @r"
+■ The session must start before you can change its working directory.
+■ Changing directories requires an idle primary session without queued input.
+");
 }
 
 #[tokio::test]

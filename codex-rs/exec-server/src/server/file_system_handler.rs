@@ -4,6 +4,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use codex_exec_server_protocol::JSONRPCErrorError;
 
+use crate::CapabilityRootsDiscoverParams;
+use crate::CapabilityRootsDiscoverResponse;
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
 use crate::ExecServerRuntimePaths;
@@ -11,6 +13,7 @@ use crate::ExecutorFileSystem;
 use crate::RemoveOptions;
 use crate::file_read::FileReadHandleManager;
 use crate::local_file_system::LocalFileSystem;
+use crate::protocol::FS_READ_DIRECTORY_METHOD;
 use crate::protocol::FS_WRITE_FILE_METHOD;
 use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCanonicalizeResponse;
@@ -42,6 +45,9 @@ use crate::rpc::invalid_request;
 use crate::rpc::not_found;
 
 const MAX_FILE_READ_HANDLE_ID_BYTES: usize = 32;
+// Each read-directory entry needs four JSON values. Keep same-version
+// producers comfortably below the shared 256K-value decoder budget.
+const MAX_READ_DIRECTORY_ENTRIES: usize = 50_000;
 
 #[derive(Clone)]
 pub(crate) struct FileSystemHandler {
@@ -59,6 +65,15 @@ impl FileSystemHandler {
 
     pub(crate) async fn shutdown(&self) {
         self.file_reads.close_all().await;
+    }
+
+    pub(crate) async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+    ) -> Result<CapabilityRootsDiscoverResponse, JSONRPCErrorError> {
+        crate::discover_capability_roots(&self.file_system, params)
+            .await
+            .map_err(|error| invalid_request(error.to_string()))
     }
 
     pub(crate) async fn open(
@@ -138,6 +153,27 @@ impl FileSystemHandler {
         &self,
         params: FsCreateDirectoryParams,
     ) -> Result<FsCreateDirectoryResponse, JSONRPCErrorError> {
+        if params.private.unwrap_or(false) {
+            if params.recursive.unwrap_or(false) || params.sandbox.is_some() {
+                return Err(invalid_request(
+                    "private directories must be non-recursive and unsandboxed".to_string(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                let path = params.path.to_abs_path().map_err(map_fs_error)?;
+                let mut builder = tokio::fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder.create(path.as_path()).await.map_err(map_fs_error)?;
+                return Ok(FsCreateDirectoryResponse {});
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(invalid_request(
+                    "owner-private directories are unsupported on this platform".to_string(),
+                ));
+            }
+        }
         let recursive = params.recursive.unwrap_or(true);
         self.file_system
             .create_directory(
@@ -189,7 +225,14 @@ impl FileSystemHandler {
             .file_system
             .read_directory(&params.path, params.sandbox.as_ref())
             .await
-            .map_err(map_fs_error)?
+            .map_err(map_fs_error)?;
+        let entry_count = entries.len();
+        if entry_count > MAX_READ_DIRECTORY_ENTRIES {
+            return Err(internal_error(format!(
+                "{FS_READ_DIRECTORY_METHOD} returned {entry_count} entries; limit is {MAX_READ_DIRECTORY_ENTRIES}"
+            )));
+        }
+        let entries = entries
             .into_iter()
             .map(|entry| FsReadDirectoryEntry {
                 file_name: entry.file_name,
@@ -267,6 +310,9 @@ fn map_fs_error(err: io::Error) -> JSONRPCErrorError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use codex_protocol::protocol::NetworkAccess;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_utils_path_uri::PathUri;
@@ -276,6 +322,62 @@ mod tests {
     use crate::FileSystemSandboxContext;
     use crate::protocol::FsReadFileParams;
     use crate::protocol::FsWriteFileParams;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_directories_are_created_with_owner_only_permissions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let runtime_paths = ExecServerRuntimePaths::new(
+            std::env::current_exe().expect("current exe"),
+            /*codex_linux_sandbox_exe*/ None,
+        )
+        .expect("runtime paths");
+        let handler = FileSystemHandler::new(runtime_paths);
+        let directory = temp_dir.path().join("private-metrics");
+        handler
+            .create_directory(FsCreateDirectoryParams {
+                path: PathUri::from_host_native_path(&directory).expect("directory URI"),
+                recursive: Some(false),
+                sandbox: None,
+                private: Some(true),
+            })
+            .await
+            .expect("create private directory");
+
+        assert_eq!(
+            std::fs::metadata(directory)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn private_directories_are_rejected_when_owner_only_permissions_are_unsupported() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let runtime_paths = ExecServerRuntimePaths::new(
+            std::env::current_exe().expect("current exe"),
+            /*codex_linux_sandbox_exe*/ None,
+        )
+        .expect("runtime paths");
+        let handler = FileSystemHandler::new(runtime_paths);
+        let directory = temp_dir.path().join("private-metrics");
+        let error = handler
+            .create_directory(FsCreateDirectoryParams {
+                path: PathUri::from_host_native_path(&directory).expect("directory URI"),
+                recursive: Some(false),
+                sandbox: None,
+                private: Some(true),
+            })
+            .await
+            .expect_err("private directories must fail closed");
+
+        assert!(error.message.contains("owner-private directories"));
+        assert!(!directory.exists());
+    }
 
     #[tokio::test]
     async fn no_platform_sandbox_policies_do_not_require_configured_sandbox_helper() {

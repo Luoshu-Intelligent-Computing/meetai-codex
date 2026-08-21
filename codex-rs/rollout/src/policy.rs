@@ -1,5 +1,6 @@
+use crate::RolloutItem;
 use crate::protocol::EventMsg;
-use crate::protocol::RolloutItem;
+use codex_extension_items::ExtensionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -7,7 +8,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 /// Whether a rollout `item` should be persisted in rollout files.
 pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistoryMode) -> bool {
     match item {
-        RolloutItem::ResponseItem(item) => should_persist_response_item(item),
+        RolloutItem::ResponseItem(item) => should_persist_response_item(&item.item),
         RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
         RolloutItem::EventMsg(ev) => should_persist_event_msg(ev, history_mode),
@@ -15,6 +16,7 @@ pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistory
         RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::SessionMeta(_) => true,
     }
 }
@@ -89,7 +91,10 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
             // Paginated rollouts store TurnItems.
             // Legacy rollouts keep only items with no raw ResponseItem or legacy equivalent.
             matches!(history_mode, ThreadHistoryMode::Paginated)
-                || matches!(event.item, TurnItem::Plan(_) | TurnItem::Sleep(_))
+                || matches!(
+                    event.item,
+                    TurnItem::Plan(_) | TurnItem::Extension(ExtensionItem::Sleep(_))
+                )
         }
         EventMsg::TokenCount(_)
         | EventMsg::ThreadGoalUpdated(_)
@@ -116,6 +121,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
 
         // Transient, non-durable events.
         EventMsg::Error(_)
+        | EventMsg::ThreadQueueChanged(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
         | EventMsg::ViewImageToolCall(_)
@@ -138,8 +144,12 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::RawResponseItem(_)
+        | EventMsg::RawResponseCompleted(_)
         | EventMsg::SessionConfigured(_)
+        | EventMsg::EnvironmentConnected(_)
+        | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::McpToolCallBegin(_)
+        | EventMsg::McpToolCallProgress(_)
         | EventMsg::ExecCommandBegin(_)
         | EventMsg::TerminalInteraction(_)
         | EventMsg::ExecCommandOutputDelta(_)

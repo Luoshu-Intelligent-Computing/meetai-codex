@@ -2,16 +2,17 @@ use anyhow::Result;
 use anyhow::anyhow;
 use codex_core::ForkSnapshot;
 use codex_core::StartThreadOptions;
+use codex_core::TurnInputRequest;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_home::CodexHomeUserInstructionsProvider;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -29,6 +30,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_no_remote_env;
 use core_test_support::test_codex::RecordingUserInstructionsProvider;
 use core_test_support::test_codex::TestCodexBuilder;
+use core_test_support::test_codex::executor_path_uri;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -91,9 +93,9 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
         .into_iter()
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item
-                && let Some(state) = world_state.state.as_object_mut()
+                && world_state.state.remove("agents_md").is_some()
             {
-                removed_section |= state.remove("agents_md").is_some();
+                removed_section = true;
             }
             serde_json::to_string(&line)
         })
@@ -115,8 +117,8 @@ fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
         .collect()
 }
 
-fn expected_instruction_fragment(cwd: &AbsolutePathBuf, contents: &str) -> String {
-    let cwd = PathUri::from_abs_path(cwd).inferred_native_path_string();
+fn expected_instruction_fragment(cwd: &PathUri, contents: &str) -> String {
+    let cwd = cwd.inferred_native_path_string();
     format!("# AGENTS.md instructions for {cwd}\n\n<INSTRUCTIONS>\n{contents}\n</INSTRUCTIONS>")
 }
 
@@ -150,16 +152,10 @@ fn assert_single_instruction_fragment(request: &responses::ResponsesRequest, exp
 
 async fn submit_thread_turn(thread: &Arc<codex_core::CodexThread>, prompt: &str) -> Result<()> {
     thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: prompt.to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     Ok(())
@@ -190,8 +186,8 @@ async fn agents_override_is_preferred_over_agents_md() -> Result<()> {
         agents_instructions(test_codex().with_workspace_setup(|cwd, fs| async move {
             let agents_md = cwd.join("AGENTS.md");
             let override_md = cwd.join("AGENTS.override.md");
-            let agents_md_uri = PathUri::from_host_native_path(&agents_md)?;
-            let override_md_uri = PathUri::from_host_native_path(&override_md)?;
+            let agents_md_uri = executor_path_uri(&agents_md)?;
+            let override_md_uri = executor_path_uri(&override_md)?;
             fs.write_file(&agents_md_uri, b"base doc".to_vec(), /*sandbox*/ None)
                 .await?;
             fs.write_file(
@@ -226,8 +222,8 @@ async fn configured_fallback_is_used_when_agents_candidate_is_directory() -> Res
             .with_workspace_setup(|cwd, fs| async move {
                 let agents_dir = cwd.join("AGENTS.md");
                 let fallback = cwd.join("WORKFLOW.md");
-                let agents_dir_uri = PathUri::from_host_native_path(&agents_dir)?;
-                let fallback_uri = PathUri::from_host_native_path(&fallback)?;
+                let agents_dir_uri = executor_path_uri(&agents_dir)?;
+                let fallback_uri = executor_path_uri(&fallback)?;
                 fs.create_directory(
                     &agents_dir_uri,
                     CreateDirectoryOptions { recursive: true },
@@ -269,10 +265,10 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
                 let root_agents = root.join("AGENTS.md");
                 let git_marker = root.join(".git");
                 let nested_agents = nested.join("AGENTS.md");
-                let nested_uri = PathUri::from_host_native_path(&nested)?;
-                let root_agents_uri = PathUri::from_host_native_path(&root_agents)?;
-                let git_marker_uri = PathUri::from_host_native_path(&git_marker)?;
-                let nested_agents_uri = PathUri::from_host_native_path(&nested_agents)?;
+                let nested_uri = executor_path_uri(&nested)?;
+                let root_agents_uri = executor_path_uri(&root_agents)?;
+                let git_marker_uri = executor_path_uri(&git_marker)?;
+                let nested_agents_uri = executor_path_uri(&nested_agents)?;
 
                 fs.create_directory(
                     &nested_uri,
@@ -412,7 +408,7 @@ async fn selected_environment_sources_match_model_visible_instructions() -> Resu
     let mut builder = test_codex()
         .with_home(home)
         .with_workspace_setup(|cwd, fs| async move {
-            let agents_md_uri = PathUri::from_host_native_path(cwd.join("AGENTS.md"))?;
+            let agents_md_uri = executor_path_uri(cwd.join("AGENTS.md"))?;
             fs.write_file(
                 &agents_md_uri,
                 b"project doc".to_vec(),
@@ -422,14 +418,13 @@ async fn selected_environment_sources_match_model_visible_instructions() -> Resu
             Ok::<(), anyhow::Error>(())
         });
     let test = builder.build_with_auto_env(&server).await?;
-    let project_agents = test.config.cwd.join("AGENTS.md");
     let global_agents = global_agents.abs();
 
     assert_eq!(
         test.codex.instruction_sources().await,
         vec![
             PathUri::from_abs_path(&global_agents),
-            PathUri::from_abs_path(&project_agents),
+            test.workspace_path_uri("AGENTS.md")?,
         ]
     );
 
@@ -469,8 +464,7 @@ async fn loads_user_instructions_without_a_primary_environment() -> Result<()> {
         .with_home(Arc::clone(&home))
         .with_user_instructions_provider(provider.clone())
         .with_workspace_setup(|cwd, fs| async move {
-            let project_agents_uri =
-                PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?;
+            let project_agents_uri = executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?;
             fs.write_file(
                 &project_agents_uri,
                 PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
@@ -484,19 +478,9 @@ async fn loads_user_instructions_without_a_primary_environment() -> Result<()> {
 
     let no_environment_thread = test
         .thread_manager
-        .start_thread_with_options(StartThreadOptions {
-            config: test.config.clone(),
-            allow_provider_model_fallback: false,
-            initial_history: InitialHistory::New,
-            history_mode: None,
-            session_source: None,
-            thread_source: None,
-            dynamic_tools: Vec::new(),
-            metrics_service_name: None,
-            parent_trace: None,
-            environments: Vec::new(),
-            thread_extension_init: Default::default(),
-            supports_openai_form_elicitation: false,
+        .start_thread(StartThreadOptions {
+            environments: Some(Vec::new()),
+            ..StartThreadOptions::new(test.config.clone())
         })
         .await?;
     assert_eq!(provider.load_count(), 2);
@@ -507,16 +491,10 @@ async fn loads_user_instructions_without_a_primary_environment() -> Result<()> {
 
     no_environment_thread
         .thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "inspect global instructions without an environment".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "inspect global instructions without an environment".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&no_environment_thread.thread, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -556,7 +534,7 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
     let mut builder = test_codex()
         .with_home(Arc::clone(&home))
         .with_workspace_setup(|cwd, fs| async move {
-            let agents_md_uri = PathUri::from_host_native_path(cwd.join("AGENTS.md"))?;
+            let agents_md_uri = executor_path_uri(cwd.join("AGENTS.md"))?;
             fs.write_file(
                 &agents_md_uri,
                 PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
@@ -566,10 +544,9 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
             Ok(())
         });
     let test = builder.build_with_auto_env(&server).await?;
-    let project_source = test.config.cwd.join(GLOBAL_AGENTS_FILENAME);
     let creation_sources = vec![
         PathUri::from_abs_path(&global_source),
-        PathUri::from_abs_path(&project_source),
+        test.workspace_path_uri(GLOBAL_AGENTS_FILENAME)?,
     ];
 
     // Confirm the thread records both creation-time sources in composition order.
@@ -585,7 +562,7 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
     )?;
     test.fs()
         .write_file(
-            &PathUri::from_host_native_path(&project_source)?,
+            &test.workspace_path_uri(GLOBAL_AGENTS_FILENAME)?,
             NEW_PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
             /*sandbox*/ None,
         )
@@ -602,7 +579,10 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
     assert_eq!(requests.len(), 2);
     let expected_contents =
         format!("{GLOBAL_INSTRUCTIONS}\n\n{PROJECT_SEPARATOR}\n\n{PROJECT_INSTRUCTIONS}");
-    let expected_fragment = expected_instruction_fragment(&test.config.cwd, &expected_contents);
+    let expected_fragment = expected_instruction_fragment(
+        &test.executor_environment().selection().cwd,
+        &expected_contents,
+    );
     let fragments = instruction_fragments(&requests[0]);
     assert_eq!(fragments, vec![expected_fragment.clone()]);
     assert_single_instruction_fragment(&requests[1], &expected_fragment);
@@ -645,6 +625,72 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_environment_project_instructions_share_one_byte_budget() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_no_remote_env!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("multi-env-budget-response"),
+            responses::ev_completed("multi-env-budget-response"),
+        ]),
+    )
+    .await;
+    let local_root = TempDir::new()?;
+    std::fs::write(local_root.path().join(GLOBAL_AGENTS_FILENAME), "VWXYZ")?;
+    let mut builder = test_codex()
+        .with_config(|config| config.project_doc_max_bytes = 7)
+        .with_workspace_setup(|cwd, fs| async move {
+            fs.write_file(
+                &executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?,
+                b"ABCDE".to_vec(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        });
+    let test = builder.build_with_remote_and_local_env(&server).await?;
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![
+                TurnEnvironmentSelection {
+                    environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                    cwd: test.executor_environment().selection().cwd.clone(),
+                    workspace_roots: vec![test.executor_environment().selection().cwd.clone()],
+                    config: EnvironmentConfigState::FromThread,
+                },
+                TurnEnvironmentSelection {
+                    environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                    cwd: PathUri::from_host_native_path(local_root.path())?,
+                    workspace_roots: vec![PathUri::from_host_native_path(local_root.path())?],
+                    config: EnvironmentConfigState::FromThread,
+                },
+            ]),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+
+    submit_thread_turn(&thread.thread, "inspect the shared AGENTS.md budget").await?;
+
+    let contents = format!(
+        "for `{REMOTE_ENVIRONMENT_ID}` with root {}\n\nABCDE\n\nfor `{LOCAL_ENVIRONMENT_ID}` with root {}\n\nVW",
+        test.executor_environment()
+            .selection()
+            .cwd
+            .inferred_native_path_string(),
+        local_root.path().display(),
+    );
+    let expected =
+        format!("# AGENTS.md instructions\n\n<INSTRUCTIONS>\n{contents}\n</INSTRUCTIONS>");
+    assert_single_instruction_fragment(&response_mock.single_request(), &expected);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapshot() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_no_remote_env!(Ok(()));
@@ -680,7 +726,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
         .with_user_instructions_provider(provider.clone())
         .with_workspace_setup(|cwd, fs| async move {
             fs.write_file(
-                &PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?,
+                &executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?,
                 b"remote project instructions".to_vec(),
                 /*sandbox*/ None,
             )
@@ -691,28 +737,22 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
     let remote_source = test.config.cwd.join(GLOBAL_AGENTS_FILENAME);
     let thread = test
         .thread_manager
-        .start_thread_with_options(StartThreadOptions {
-            config: test.config.clone(),
-            allow_provider_model_fallback: false,
-            initial_history: InitialHistory::New,
-            history_mode: None,
-            session_source: None,
-            thread_source: None,
-            dynamic_tools: Vec::new(),
-            metrics_service_name: None,
-            parent_trace: None,
-            environments: vec![
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![
                 TurnEnvironmentSelection {
                     environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-                    cwd: PathUri::from_abs_path(&test.config.cwd),
+                    cwd: test.executor_environment().selection().cwd.clone(),
+                    workspace_roots: vec![test.executor_environment().selection().cwd.clone()],
+                    config: EnvironmentConfigState::FromThread,
                 },
                 TurnEnvironmentSelection {
                     environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                     cwd: PathUri::from_host_native_path(local_root.path())?,
+                    workspace_roots: vec![PathUri::from_host_native_path(local_root.path())?],
+                    config: EnvironmentConfigState::FromThread,
                 },
-            ],
-            thread_extension_init: Default::default(),
-            supports_openai_form_elicitation: false,
+            ]),
+            ..StartThreadOptions::new(test.config.clone())
         })
         .await?;
     assert_eq!(provider.load_count(), 2);
@@ -720,7 +760,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
         thread.thread.instruction_sources().await,
         vec![
             PathUri::from_abs_path(&global_source),
-            PathUri::from_abs_path(&remote_source),
+            executor_path_uri(&remote_source)?,
             PathUri::from_host_native_path(&local_source)?,
         ]
     );
@@ -734,7 +774,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
     )?;
     test.fs()
         .write_file(
-            &PathUri::from_host_native_path(test.config.cwd.join(GLOBAL_AGENTS_OVERRIDE_FILENAME))?,
+            &executor_path_uri(test.config.cwd.join(GLOBAL_AGENTS_OVERRIDE_FILENAME))?,
             b"new remote project instructions".to_vec(),
             /*sandbox*/ None,
         )
@@ -747,7 +787,10 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
 
     let contents = format!(
         "{GLOBAL_INSTRUCTIONS}\n\nfor `{REMOTE_ENVIRONMENT_ID}` with root {}\n\nremote project instructions\n\nfor `{LOCAL_ENVIRONMENT_ID}` with root {}\n\nlocal project instructions",
-        PathUri::from_abs_path(&test.config.cwd).inferred_native_path_string(),
+        test.executor_environment()
+            .selection()
+            .cwd
+            .inferred_native_path_string(),
         local_root.path().display(),
     );
     let expected =
@@ -761,7 +804,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
         thread.thread.instruction_sources().await,
         vec![
             PathUri::from_abs_path(&global_source),
-            PathUri::from_abs_path(&remote_source),
+            executor_path_uri(&remote_source)?,
             PathUri::from_host_native_path(&local_source)?,
         ]
     );

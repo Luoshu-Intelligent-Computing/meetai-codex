@@ -4,6 +4,7 @@ use codex_network_proxy::BlockedRequestObserver;
 use codex_network_proxy::ConfigReloader;
 use codex_network_proxy::ConfigReloaderFuture;
 use codex_network_proxy::ConfigState;
+use codex_network_proxy::EnvironmentNetworkPolicy;
 use codex_network_proxy::NetworkDecision;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
@@ -14,6 +15,8 @@ use codex_network_proxy::NetworkProxyHandle;
 use codex_network_proxy::NetworkProxyState;
 use codex_network_proxy::build_config_state;
 use codex_network_proxy::host_and_port_from_network_addr;
+#[cfg(any(target_os = "windows", test))]
+use codex_network_proxy::managed_proxy_ports;
 use codex_network_proxy::normalize_host;
 use codex_network_proxy::validate_policy_against_constraints;
 use codex_protocol::models::PermissionProfile;
@@ -85,7 +88,17 @@ impl NetworkProxySpec {
         self.config.enable_socks5
     }
 
-    pub(crate) fn from_config_and_constraints(
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn configured_proxy_ports(&self) -> std::io::Result<Vec<u16>> {
+        managed_proxy_ports(&self.config).map_err(std::io::Error::other)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn allow_local_binding(&self) -> bool {
+        self.config.allow_local_binding
+    }
+
+    pub fn from_config_and_constraints(
         config: NetworkProxyConfig,
         requirements: Option<NetworkConstraints>,
         permission_profile: &PermissionProfile,
@@ -159,6 +172,11 @@ impl NetworkProxySpec {
             self.requirements.clone(),
             permission_profile,
         )
+    }
+
+    /// Returns the effective traffic policy without exposing controller-owned proxy settings.
+    pub fn environment_policy(&self) -> EnvironmentNetworkPolicy {
+        EnvironmentNetworkPolicy::from_config(&self.config, self.hard_deny_allowlist_misses)
     }
 
     pub(crate) fn with_exec_policy_network_rules(

@@ -23,9 +23,12 @@ use codex_exec_server::Environment;
 use codex_exec_server::ExecServerClient;
 use codex_exec_server::HttpClient;
 use codex_exec_server::RemoteExecServerConnectArgs;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use codex_rmcp_client::RmcpClient;
+use codex_rmcp_client::SendProgress;
 use codex_utils_cargo_bin::CargoBinError;
 use futures::FutureExt as _;
 use pretty_assertions::assert_eq;
@@ -56,12 +59,8 @@ fn streamable_http_server_bin() -> Result<PathBuf, CargoBinError> {
 
 fn init_params() -> InitializeRequestParams {
     let mut capabilities = ClientCapabilities::default();
-    capabilities.elicitation = Some(ElicitationCapability {
-        form: Some(FormElicitationCapability {
-            schema_validation: None,
-        }),
-        url: None,
-    });
+    capabilities.elicitation =
+        Some(ElicitationCapability::new().with_form(FormElicitationCapability::new()));
     InitializeRequestParams::new(
         capabilities,
         Implementation::new("codex-test", "0.0.0-test").with_title("Codex rmcp recovery test"),
@@ -71,6 +70,7 @@ fn init_params() -> InitializeRequestParams {
 
 pub(crate) fn expected_echo_result(message: &str) -> CallToolResult {
     let mut result = CallToolResult::success(Vec::new());
+    result.result_type = None;
     result.structured_content = Some(json!({
         "echo": format!("ECHOING: {message}"),
         "env": null,
@@ -87,6 +87,26 @@ pub(crate) async fn create_client_with_http_client(
     base_url: &str,
     http_client: Arc<dyn HttpClient>,
 ) -> anyhow::Result<RmcpClient> {
+    create_client_with_http_client_and_progress(base_url, http_client, None).await
+}
+
+pub(crate) async fn create_client_with_progress(
+    base_url: &str,
+    send_progress: SendProgress,
+) -> anyhow::Result<RmcpClient> {
+    create_client_with_http_client_and_progress(
+        base_url,
+        Environment::default_for_tests().get_http_client(),
+        Some(send_progress),
+    )
+    .await
+}
+
+async fn create_client_with_http_client_and_progress(
+    base_url: &str,
+    http_client: Arc<dyn HttpClient>,
+    send_progress: Option<SendProgress>,
+) -> anyhow::Result<RmcpClient> {
     let client = RmcpClient::new_streamable_http_client(
         "test-streamable-http",
         &format!("{base_url}/mcp"),
@@ -100,14 +120,21 @@ pub(crate) async fn create_client_with_http_client(
     )
     .await?;
 
-    initialize_client(&client).await?;
+    initialize_client_with_progress(&client, send_progress).await?;
 
     Ok(client)
 }
 
 pub(crate) async fn initialize_client(client: &RmcpClient) -> anyhow::Result<()> {
+    initialize_client_with_progress(client, None).await
+}
+
+async fn initialize_client_with_progress(
+    client: &RmcpClient,
+    send_progress: Option<SendProgress>,
+) -> anyhow::Result<()> {
     client
-        .initialize(
+        .initialize_with_progress(
             init_params(),
             Some(Duration::from_secs(5)),
             Box::new(|_, _| {
@@ -120,6 +147,7 @@ pub(crate) async fn initialize_client(client: &RmcpClient) -> anyhow::Result<()>
                 }
                 .boxed()
             }),
+            send_progress,
         )
         .await?;
     Ok(())
@@ -178,13 +206,17 @@ pub(crate) async fn call_echo_tool(
         .await
 }
 
+fn control_client() -> anyhow::Result<codex_http_client::HttpClient> {
+    Ok(codex_http_client::HttpClientBuilder::new().build_direct()?)
+}
+
 pub(crate) async fn arm_session_post_failure(
     base_url: &str,
     status: u16,
     remaining: usize,
     www_authenticate_headers: &[&str],
 ) -> anyhow::Result<()> {
-    let response = reqwest::Client::new()
+    let response = control_client()?
         .post(format!("{base_url}{SESSION_POST_FAILURE_CONTROL_PATH}"))
         .json(&json!({
             "status": status,
@@ -194,7 +226,7 @@ pub(crate) async fn arm_session_post_failure(
         .send()
         .await?;
 
-    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -203,7 +235,7 @@ pub(crate) async fn arm_session_post_json_rpc_failure(
     status: u16,
     remaining: usize,
 ) -> anyhow::Result<()> {
-    let response = reqwest::Client::new()
+    let response = control_client()?
         .post(format!("{base_url}{SESSION_POST_FAILURE_CONTROL_PATH}"))
         .json(&json!({
             "status": status,
@@ -221,7 +253,7 @@ pub(crate) async fn arm_session_post_json_rpc_failure(
         .send()
         .await?;
 
-    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -230,7 +262,7 @@ pub(crate) async fn arm_initialized_notification_post_json_rpc_failure(
     status: u16,
     remaining: usize,
 ) -> anyhow::Result<()> {
-    let response = reqwest::Client::new()
+    let response = control_client()?
         .post(format!(
             "{base_url}{INITIALIZED_NOTIFICATION_POST_FAILURE_CONTROL_PATH}"
         ))
@@ -250,7 +282,7 @@ pub(crate) async fn arm_initialized_notification_post_json_rpc_failure(
         .send()
         .await?;
 
-    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -259,7 +291,7 @@ pub(crate) async fn arm_initialize_post_failure(
     status: u16,
     remaining: usize,
 ) -> anyhow::Result<()> {
-    let response = reqwest::Client::new()
+    let response = control_client()?
         .post(format!("{base_url}{INITIALIZE_POST_FAILURE_CONTROL_PATH}"))
         .json(&json!({
             "status": status,
@@ -268,7 +300,7 @@ pub(crate) async fn arm_initialize_post_failure(
         .send()
         .await?;
 
-    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -277,7 +309,7 @@ pub(crate) async fn arm_initialize_post_json_rpc_failure(
     status: u16,
     remaining: usize,
 ) -> anyhow::Result<()> {
-    let response = reqwest::Client::new()
+    let response = control_client()?
         .post(format!("{base_url}{INITIALIZE_POST_FAILURE_CONTROL_PATH}"))
         .json(&json!({
             "status": status,
@@ -295,7 +327,7 @@ pub(crate) async fn arm_initialize_post_json_rpc_failure(
         .send()
         .await?;
 
-    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -345,6 +377,7 @@ pub(crate) async fn spawn_exec_server() -> anyhow::Result<ExecServerProcess> {
     let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
         websocket_url,
         "rmcp-client-remote-http-test".to_string(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     ))
     .await?;
 
