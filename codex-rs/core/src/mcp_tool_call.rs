@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -105,6 +106,10 @@ const MCP_RESULT_TELEMETRY_SERVER_USER_FLOW_SPAN_ATTR: &str =
     "codex.mcp.server_user_flow.triggered";
 const MCP_RESULT_TELEMETRY_TARGET_ID_MAX_CHARS: usize = 256;
 const MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES: usize = DEFAULT_OUTPUT_BYTES_CAP;
+const MEETAI_RESOURCE_MCP_SERVER_NAME: &str = "meetai_resource";
+const MEETAI_APPLICATION_CONTEXT_KEY: &str = "application";
+const MEETAI_LIBRARY_SCOPE_META_KEY: &str = "meetai/library_scope";
+const MEETAI_LIBRARY_SCOPE_SCHEMA: &str = "meetai.scope.v1";
 
 /// Handles the specified tool call and dispatches the appropriate MCP tool-call
 /// item lifecycle events to the `Session`.
@@ -164,6 +169,26 @@ pub(crate) async fn handle_mcp_tool_call(
     };
     let metadata = mcp_tool_metadata(&prepared_call);
     let item_metadata = McpToolCallItemMetadata::from_tool_metadata(&server, Some(&metadata));
+    let meetai_library_scope = match snapshot_meetai_library_scope(&sess, &server).await {
+        Ok(scope) => scope,
+        Err(error) => {
+            let result = notify_mcp_tool_call_skip(
+                sess.as_ref(),
+                turn_context.as_ref(),
+                &call_id,
+                invocation,
+                item_metadata,
+                format!("tool call error: {error}"),
+                /*already_started*/ false,
+            )
+            .await;
+            return HandledMcpToolCall {
+                result: CallToolResult::from_result(result),
+                tool_input: arguments_value
+                    .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+            };
+        }
+    };
     let runtime_config = prepared_call.config();
     let app_tool_policy = if server == CODEX_APPS_MCP_SERVER_NAME {
         let annotations = metadata.annotations.as_ref();
@@ -257,6 +282,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     prepared_call,
                     metadata,
                     item_metadata,
+                    meetai_library_scope,
                     McpToolApprovalApplication::Apply {
                         decision,
                         policy: approval_policy,
@@ -330,6 +356,7 @@ pub(crate) async fn handle_mcp_tool_call(
         prepared_call,
         metadata,
         item_metadata,
+        meetai_library_scope,
         McpToolApprovalApplication::NotRequired,
     )
     .await
@@ -392,6 +419,7 @@ async fn handle_approved_mcp_tool_call(
     prepared_call: PreparedMcpCall,
     metadata: McpToolApprovalMetadata,
     item_metadata: McpToolCallItemMetadata,
+    meetai_library_scope: Option<JsonValue>,
     approval_application: McpToolApprovalApplication,
 ) -> HandledMcpToolCall {
     let turn_context = step_context.turn.as_ref();
@@ -470,6 +498,10 @@ async fn handle_approved_mcp_tool_call(
                         request_meta,
                         &sess.thread_id.to_string(),
                     );
+                    let request_meta = augment_meetai_library_scope_request_meta(
+                        request_meta,
+                        &meetai_library_scope,
+                    )?;
                     let request_meta = augment_mcp_tool_request_meta_with_sandbox_state(
                         step_context,
                         &prepared_call,
@@ -797,6 +829,128 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
         }
     }
 
+    Ok(meta)
+}
+
+async fn snapshot_meetai_library_scope(
+    session: &Session,
+    server: &str,
+) -> anyhow::Result<Option<JsonValue>> {
+    if server != MEETAI_RESOURCE_MCP_SERVER_NAME {
+        return Ok(None);
+    }
+
+    let application_context = session
+        .snapshot_application_context_value(MEETAI_APPLICATION_CONTEXT_KEY)
+        .await;
+    let Some(application_context) = application_context else {
+        return Ok(None);
+    };
+
+    let scope = serde_json::from_str::<serde_json::Value>(&application_context).map_err(|_| {
+        tracing::warn!(
+            "rejecting MeetAI MCP tool call because the application library scope is invalid"
+        );
+        anyhow::anyhow!("MeetAI library scope is invalid")
+    })?;
+    let serde_json::Value::Object(scope) = scope else {
+        tracing::warn!(
+            "rejecting MeetAI MCP tool call because the application library scope is not an object"
+        );
+        anyhow::bail!("MeetAI library scope is invalid");
+    };
+    let Some(library) = scope.get("library") else {
+        return Ok(None);
+    };
+
+    validate_meetai_library_scope(&scope, library)?;
+
+    Ok(Some(JsonValue::Object(scope)))
+}
+
+fn validate_meetai_library_scope(
+    scope: &serde_json::Map<String, JsonValue>,
+    library: &JsonValue,
+) -> anyhow::Result<()> {
+    validate_meetai_scope_keys(scope, &["schema", "meeting", "library"])?;
+    if scope.get("schema").and_then(JsonValue::as_str) != Some(MEETAI_LIBRARY_SCOPE_SCHEMA) {
+        anyhow::bail!("MeetAI library scope is invalid");
+    }
+
+    if let Some(meeting) = scope.get("meeting") {
+        let meeting = meeting
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+        validate_meetai_scope_keys(meeting, &["id"])?;
+        validate_meetai_scope_string(
+            meeting
+                .get("id")
+                .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?,
+        )?;
+    }
+
+    let library = library
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+    validate_meetai_scope_keys(library, &["projectKey", "documentIds"])?;
+    let project_key = library.get("projectKey");
+    let document_ids = library.get("documentIds");
+    if project_key.is_none() && document_ids.is_none() {
+        anyhow::bail!("MeetAI library scope is invalid");
+    }
+    if let Some(project_key) = project_key {
+        validate_meetai_scope_string(project_key)?;
+    }
+    if let Some(document_ids) = document_ids {
+        let document_ids = document_ids
+            .as_array()
+            .filter(|document_ids| !document_ids.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+        let mut unique_document_ids = HashSet::with_capacity(document_ids.len());
+        for document_id in document_ids {
+            let document_id = validate_meetai_scope_string(document_id)?;
+            if !unique_document_ids.insert(document_id) {
+                anyhow::bail!("MeetAI library scope is invalid");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_meetai_scope_keys(
+    value: &serde_json::Map<String, JsonValue>,
+    allowed_keys: &[&str],
+) -> anyhow::Result<()> {
+    if value
+        .keys()
+        .any(|key| !allowed_keys.contains(&key.as_str()))
+    {
+        anyhow::bail!("MeetAI library scope is invalid");
+    }
+    Ok(())
+}
+
+fn validate_meetai_scope_string(value: &JsonValue) -> anyhow::Result<&str> {
+    let value = value
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+    Ok(value)
+}
+
+fn augment_meetai_library_scope_request_meta(
+    mut meta: Option<JsonValue>,
+    meetai_library_scope: &Option<JsonValue>,
+) -> anyhow::Result<Option<JsonValue>> {
+    let Some(scope) = meetai_library_scope else {
+        return Ok(meta);
+    };
+    let request_meta = match meta.get_or_insert_with(|| JsonValue::Object(serde_json::Map::new())) {
+        JsonValue::Object(request_meta) => request_meta,
+        _ => anyhow::bail!("MeetAI MCP request metadata is invalid"),
+    };
+    request_meta.insert(MEETAI_LIBRARY_SCOPE_META_KEY.to_string(), scope.clone());
     Ok(meta)
 }
 

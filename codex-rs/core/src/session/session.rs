@@ -586,6 +586,14 @@ impl Session {
         state.session_configuration.originator.clone()
     }
 
+    pub(crate) async fn snapshot_application_context_value(&self, key: &str) -> Option<String> {
+        let state = self.state.lock().await;
+        state
+            .additional_context
+            .application_value(key)
+            .map(str::to_owned)
+    }
+
     #[instrument(name = "session_init", level = "info", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(

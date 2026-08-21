@@ -50,6 +50,81 @@ use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_test::internal::MockWriter;
 
+#[test]
+fn meetai_library_scope_request_meta_rejects_non_object_meta() {
+    let scope = Some(serde_json::json!({
+        "schema": "meetai.scope.v1",
+        "library": {"projectKey": "project"},
+    }));
+    for meta in [
+        Some(serde_json::json!("not-an-object")),
+        Some(serde_json::json!(["not-an-object"])),
+    ] {
+        assert!(augment_meetai_library_scope_request_meta(meta, &scope).is_err());
+    }
+}
+
+#[test]
+fn meetai_library_scope_request_meta_preserves_existing_object_fields() {
+    let result = augment_meetai_library_scope_request_meta(
+        Some(serde_json::json!({"existing": "preserved"})),
+        &Some(serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "library": {"projectKey": "project"},
+        })),
+    )
+    .expect("object metadata should accept the MeetAI scope");
+
+    assert_eq!(
+        result,
+        Some(serde_json::json!({
+            "existing": "preserved",
+            "meetai/library_scope": {
+                "schema": "meetai.scope.v1",
+                "library": {"projectKey": "project"},
+            }
+        }))
+    );
+}
+
+#[test]
+fn meetai_library_scope_validation_rejects_unknown_and_malformed_fields() {
+    let invalid_scopes = [
+        serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "library": null,
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "library": {"projectKey": "project", "extra": true},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "library": {"documentIds": ["document", 42]},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "meeting": {},
+            "library": {"projectKey": "project"},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "meeting": {"id": "meeting", "extra": true},
+            "library": {"projectKey": "project"},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v1",
+            "library": {"projectKey": "project"},
+            "extra": true,
+        }),
+    ];
+
+    for scope in invalid_scopes {
+        let scope = scope.as_object().expect("scope fixture is an object");
+        assert!(validate_meetai_library_scope(scope, scope.get("library").unwrap()).is_err());
+    }
+}
+
 fn annotations(
     read_only: Option<bool>,
     destructive: Option<bool>,
