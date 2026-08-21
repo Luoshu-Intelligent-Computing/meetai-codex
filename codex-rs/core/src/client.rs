@@ -317,7 +317,6 @@ fn responses_request_properties_match(
         tools: previous_tools,
         tool_choice: previous_tool_choice,
         parallel_tool_calls: previous_parallel_tool_calls,
-        temperature: previous_temperature,
         reasoning: previous_reasoning,
         store: previous_store,
         stream: previous_stream,
@@ -335,7 +334,6 @@ fn responses_request_properties_match(
         tools: current_tools,
         tool_choice: current_tool_choice,
         parallel_tool_calls: current_parallel_tool_calls,
-        temperature: current_temperature,
         reasoning: current_reasoning,
         store: current_store,
         stream: current_stream,
@@ -352,7 +350,6 @@ fn responses_request_properties_match(
         && previous_tools == current_tools
         && previous_tool_choice == current_tool_choice
         && previous_parallel_tool_calls == current_parallel_tool_calls
-        && previous_temperature == current_temperature
         && previous_reasoning == current_reasoning
         && previous_store == current_store
         && previous_stream == current_stream
@@ -592,7 +589,7 @@ impl ModelClient {
             model,
             instructions,
             mut input,
-            mut tools,
+            tools,
             parallel_tool_calls,
             reasoning,
             service_tier,
@@ -606,7 +603,7 @@ impl ModelClient {
             input: &input,
             instructions: &instructions,
             tools,
-            parallel_tool_calls: parallel_tool_calls && !omit_tools,
+            parallel_tool_calls,
             reasoning,
             service_tier: service_tier.as_deref(),
             prompt_cache_key: prompt_cache_key.as_deref(),

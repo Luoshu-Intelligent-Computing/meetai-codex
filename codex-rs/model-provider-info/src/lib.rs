@@ -190,12 +190,6 @@ fn default_aws_auth_refresh_timeout_ms() -> NonZeroU64 {
 
 impl ModelProviderInfo {
     pub fn validate(&self) -> std::result::Result<(), String> {
-        if self.temperature.is_some_and(|temperature| {
-            !temperature.is_finite() || !(0.0..=2.0).contains(&temperature)
-        }) {
-            return Err("provider temperature must be between 0 and 2".to_string());
-        }
-
         if self.aws.is_some() {
             if self.supports_websockets {
                 // TODO(celia-oai): Support AWS SigV4 signing for WebSocket

@@ -37,23 +37,6 @@ base_url = "http://localhost:11434/v1"
 }
 
 #[test]
-fn test_deserialize_responses_request_overrides() {
-    let provider: ModelProviderInfo = toml::from_str(
-        r#"
-name = "Work Assistant"
-base_url = "https://example.test/v1"
-temperature = 0.0
-omit_tools_for_responses_compact = true
-"#,
-    )
-    .expect("provider overrides should deserialize");
-
-    assert_eq!(provider.temperature, Some(0.0));
-    assert!(provider.omit_tools_for_responses_compact);
-    assert_eq!(provider.validate(), Ok(()));
-}
-
-#[test]
 fn test_deserialize_azure_model_provider_toml() {
     let azure_provider_toml = r#"
 name = "Azure"

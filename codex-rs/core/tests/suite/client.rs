@@ -2178,7 +2178,6 @@ async fn includes_configured_max_effort_in_request() -> anyhow::Result<()> {
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_reasoning_effort = Some(ReasoningEffort::Max);
-            config.model_provider.temperature = Some(0.0);
         })
         .build(&server)
         .await?;
@@ -2203,8 +2202,6 @@ async fn includes_configured_max_effort_in_request() -> anyhow::Result<()> {
             .and_then(|v| v.as_str()),
         Some("max")
     );
-    assert_eq!(request_body["temperature"].as_f64(), Some(0.0));
-    assert_eq!(request_body["tool_choice"].as_str(), Some("auto"));
 
     Ok(())
 }
