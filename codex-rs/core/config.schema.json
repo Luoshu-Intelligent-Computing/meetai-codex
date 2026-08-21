@@ -1977,11 +1977,6 @@
           "description": "Friendly display name.",
           "type": "string"
         },
-        "omit_tools_for_responses_compact": {
-          "default": false,
-          "description": "Whether `/responses/compact` requests should omit the turn's tool catalog.",
-          "type": "boolean"
-        },
         "query_params": {
           "additionalProperties": {
             "type": "string"
@@ -2021,11 +2016,6 @@
           "default": false,
           "description": "Whether this provider supports the Responses API WebSocket transport.",
           "type": "boolean"
-        },
-        "temperature": {
-          "description": "Optional sampling temperature forwarded to Responses requests.",
-          "format": "double",
-          "type": "number"
         },
         "websocket_connect_timeout_ms": {
           "description": "Maximum time (in milliseconds) to wait for a websocket connection attempt before treating it as failed.",

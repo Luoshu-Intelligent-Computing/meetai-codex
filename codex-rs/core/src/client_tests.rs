@@ -60,8 +60,6 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
-use codex_tools::ResponsesApiTool;
-use codex_tools::ToolSpec;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -148,8 +146,6 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
     let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
-    provider.temperature = Some(0.0);
-    provider.omit_tools_for_responses_compact = true;
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
         Some(auth_manager),
@@ -180,14 +176,6 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
             text: "base instructions".to_string(),
             provenance: None,
         },
-        tools: vec![ToolSpec::Function(ResponsesApiTool {
-            name: "synthetic_lookup".to_string(),
-            description: "Synthetic compact contract tool".to_string(),
-            strict: false,
-            defer_loading: None,
-            parameters: Default::default(),
-            output_schema: None,
-        })],
         ..Default::default()
     };
     let responses_metadata = test_responses_metadata_for_client(
@@ -224,11 +212,6 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         .iter()
         .find(|request| request.url.path() == "/v1/responses/compact")
         .expect("compact request should be captured");
-    let compact_body: serde_json::Value = serde_json::from_slice(&compact_request.body)?;
-    assert!(compact_body.get("tools").is_none());
-    assert_eq!(compact_body["parallel_tool_calls"], false);
-    assert!(compact_body.get("tool_choice").is_none());
-    assert!(compact_body.get("temperature").is_none());
     assert_eq!(
         compact_request
             .headers
