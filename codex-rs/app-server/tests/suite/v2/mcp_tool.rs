@@ -413,8 +413,11 @@ async fn meetai_mcp_tool_call_projects_current_application_library_scope() -> Re
         &thread.id,
         second_call_id,
         Some(json!({
-            "schema": "meetai.scope.v1",
-            "library": {"projectKey": "project-two", "documentIds": ["doc-two"]}
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [
+                {"kind": "personal", "projectKeys": ["project-two"], "documentIds": ["doc-two"]},
+                {"kind": "shared", "libraryId": "shared-library-two", "projectKeys": ["shared-project-two"], "documentIds": ["shared-doc-two"]}
+            ]}
         })),
     )
     .await?;
@@ -442,8 +445,11 @@ async fn meetai_mcp_tool_call_projects_current_application_library_scope() -> Re
     assert_eq!(
         calls[1].get(MEETAI_LIBRARY_SCOPE_META_KEY),
         Some(&json!({
-            "schema": "meetai.scope.v1",
-            "library": {"projectKey": "project-two", "documentIds": ["doc-two"]}
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [
+                {"kind": "personal", "projectKeys": ["project-two"], "documentIds": ["doc-two"]},
+                {"kind": "shared", "libraryId": "shared-library-two", "projectKeys": ["shared-project-two"], "documentIds": ["shared-doc-two"]}
+            ]}
         }))
     );
     assert!(calls[2].get(MEETAI_LIBRARY_SCOPE_META_KEY).is_none());
@@ -455,8 +461,11 @@ async fn meetai_mcp_tool_call_projects_current_application_library_scope() -> Re
         assert!(request_body.contains("meeting-one") || request_body.contains("meeting-only"));
         assert!(!request_body.contains("project-one"));
         assert!(!request_body.contains("project-two"));
+        assert!(!request_body.contains("shared-project-two"));
         assert!(!request_body.contains("doc-one"));
         assert!(!request_body.contains("doc-two"));
+        assert!(!request_body.contains("shared-doc-two"));
+        assert!(!request_body.contains("shared-library-two"));
     }
     let read_id = mcp
         .send_thread_read_request(ThreadReadParams {
@@ -471,8 +480,11 @@ async fn meetai_mcp_tool_call_projects_current_application_library_scope() -> Re
     let persisted_thread = serde_json::to_string(&persisted_thread)?;
     assert!(!persisted_thread.contains("project-one"));
     assert!(!persisted_thread.contains("project-two"));
+    assert!(!persisted_thread.contains("shared-project-two"));
     assert!(!persisted_thread.contains("doc-one"));
     assert!(!persisted_thread.contains("doc-two"));
+    assert!(!persisted_thread.contains("shared-doc-two"));
+    assert!(!persisted_thread.contains("shared-library-two"));
 
     mcp_server_handle.abort();
     let _ = mcp_server_handle.await;
@@ -646,6 +658,10 @@ async fn application_library_scope_is_not_sent_to_non_meetai_mcp_servers() -> Re
 #[test_case(r#"{"schema":"meetai.scope.v1","meeting":{},"library":{"projectKey":"project"}}"#; "empty meeting")]
 #[test_case(r#"{"schema":"meetai.scope.v1","meeting":{"id":"meeting","unknown":true},"library":{"projectKey":"project"}}"#; "unknown meeting field")]
 #[test_case(r#"{"schema":"meetai.scope.v1","library":{"projectKey":"project"},"unknown":true}"#; "unknown scope field")]
+#[test_case(r#"{"schema":"meetai.scope.v2","library":{"selections":[]}}"#; "empty selections")]
+#[test_case(r#"{"schema":"meetai.scope.v2","library":{"selections":[{"kind":"personal","libraryId":"forbidden"}]}}"#; "personal selection with library id")]
+#[test_case(r#"{"schema":"meetai.scope.v2","library":{"selections":[{"kind":"shared","projectKeys":["project"]}]}}"#; "shared selection without library id")]
+#[test_case(r#"{"schema":"meetai.scope.v2","library":{"selections":[{"kind":"shared","libraryId":"library","documentIds":["document","document"]}]}}"#; "v2 duplicate document ids")]
 async fn invalid_meetai_application_scope_fails_before_the_mcp_request(
     application_context: &str,
 ) -> Result<()> {

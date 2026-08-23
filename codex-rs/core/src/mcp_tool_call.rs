@@ -109,7 +109,8 @@ const MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES: usize = DEFAULT_OUTPUT_BYTES_CAP;
 const MEETAI_RESOURCE_MCP_SERVER_NAME: &str = "meetai_resource";
 const MEETAI_APPLICATION_CONTEXT_KEY: &str = "application";
 const MEETAI_LIBRARY_SCOPE_META_KEY: &str = "meetai/library_scope";
-const MEETAI_LIBRARY_SCOPE_SCHEMA: &str = "meetai.scope.v1";
+const MEETAI_LIBRARY_SCOPE_SCHEMA_V1: &str = "meetai.scope.v1";
+const MEETAI_LIBRARY_SCOPE_SCHEMA_V2: &str = "meetai.scope.v2";
 
 /// Handles the specified tool call and dispatches the appropriate MCP tool-call
 /// item lifecycle events to the `Session`.
@@ -873,9 +874,10 @@ fn validate_meetai_library_scope(
     library: &JsonValue,
 ) -> anyhow::Result<()> {
     validate_meetai_scope_keys(scope, &["schema", "meeting", "library"])?;
-    if scope.get("schema").and_then(JsonValue::as_str) != Some(MEETAI_LIBRARY_SCOPE_SCHEMA) {
-        anyhow::bail!("MeetAI library scope is invalid");
-    }
+    let schema = scope
+        .get("schema")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
 
     if let Some(meeting) = scope.get("meeting") {
         let meeting = meeting
@@ -889,6 +891,14 @@ fn validate_meetai_library_scope(
         )?;
     }
 
+    match schema {
+        MEETAI_LIBRARY_SCOPE_SCHEMA_V1 => validate_meetai_library_scope_v1(library),
+        MEETAI_LIBRARY_SCOPE_SCHEMA_V2 => validate_meetai_library_scope_v2(library),
+        _ => anyhow::bail!("MeetAI library scope is invalid"),
+    }
+}
+
+fn validate_meetai_library_scope_v1(library: &JsonValue) -> anyhow::Result<()> {
     let library = library
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
@@ -902,19 +912,87 @@ fn validate_meetai_library_scope(
         validate_meetai_scope_string(project_key)?;
     }
     if let Some(document_ids) = document_ids {
-        let document_ids = document_ids
-            .as_array()
-            .filter(|document_ids| !document_ids.is_empty())
+        validate_meetai_scope_string_list(document_ids)?;
+    }
+
+    Ok(())
+}
+
+fn validate_meetai_library_scope_v2(library: &JsonValue) -> anyhow::Result<()> {
+    let library = library
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+    validate_meetai_scope_keys(library, &["selections"])?;
+    let selections = library
+        .get("selections")
+        .and_then(JsonValue::as_array)
+        .filter(|selections| !selections.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+
+    let mut has_personal_selection = false;
+    let mut shared_library_ids = HashSet::with_capacity(selections.len());
+    for selection in selections {
+        let selection = selection
+            .as_object()
             .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
-        let mut unique_document_ids = HashSet::with_capacity(document_ids.len());
-        for document_id in document_ids {
-            let document_id = validate_meetai_scope_string(document_id)?;
-            if !unique_document_ids.insert(document_id) {
-                anyhow::bail!("MeetAI library scope is invalid");
+        let kind = selection
+            .get("kind")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+        match kind {
+            "personal" => {
+                validate_meetai_scope_keys(selection, &["kind", "projectKeys", "documentIds"])?;
+                if has_personal_selection {
+                    anyhow::bail!("MeetAI library scope is invalid");
+                }
+                has_personal_selection = true;
+                validate_meetai_v2_selection_narrowing(selection)?;
             }
+            "shared" => {
+                validate_meetai_scope_keys(
+                    selection,
+                    &["kind", "libraryId", "projectKeys", "documentIds"],
+                )?;
+                let library_id = validate_meetai_scope_string(
+                    selection
+                        .get("libraryId")
+                        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?,
+                )?;
+                if !shared_library_ids.insert(library_id) {
+                    anyhow::bail!("MeetAI library scope is invalid");
+                }
+                validate_meetai_v2_selection_narrowing(selection)?;
+            }
+            _ => anyhow::bail!("MeetAI library scope is invalid"),
         }
     }
 
+    Ok(())
+}
+
+fn validate_meetai_v2_selection_narrowing(
+    selection: &serde_json::Map<String, JsonValue>,
+) -> anyhow::Result<()> {
+    for key in ["projectKeys", "documentIds"] {
+        if let Some(values) = selection.get(key) {
+            validate_meetai_scope_string_list(values)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_meetai_scope_string_list(values: &JsonValue) -> anyhow::Result<()> {
+    let values = values
+        .as_array()
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
+    let mut unique_values = HashSet::with_capacity(values.len());
+    for value in values {
+        let value = validate_meetai_scope_string(value)?;
+        if !unique_values.insert(value) {
+            anyhow::bail!("MeetAI library scope is invalid");
+        }
+    }
     Ok(())
 }
 

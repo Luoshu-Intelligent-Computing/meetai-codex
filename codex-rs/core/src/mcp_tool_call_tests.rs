@@ -88,6 +88,39 @@ fn meetai_library_scope_request_meta_preserves_existing_object_fields() {
 }
 
 #[test]
+fn meetai_library_scope_v2_preserves_independent_library_selections() {
+    let scope = serde_json::json!({
+        "schema": "meetai.scope.v2",
+        "meeting": {"id": "meeting-1"},
+        "library": {
+            "selections": [
+                {
+                    "kind": "personal",
+                    "projectKeys": ["personal-project"],
+                    "documentIds": ["personal-document"]
+                },
+                {
+                    "kind": "shared",
+                    "libraryId": "shared-library-1",
+                    "projectKeys": ["shared-project"],
+                    "documentIds": ["shared-document"]
+                }
+            ]
+        }
+    });
+    let scope_object = scope.as_object().expect("scope fixture is an object");
+    validate_meetai_library_scope(scope_object, scope_object.get("library").unwrap())
+        .expect("valid v2 scope should be accepted");
+
+    let result = augment_meetai_library_scope_request_meta(None, &Some(scope.clone()))
+        .expect("v2 scope should be preserved in the MCP metadata");
+    assert_eq!(
+        result,
+        Some(serde_json::json!({MEETAI_LIBRARY_SCOPE_META_KEY: scope}))
+    );
+}
+
+#[test]
 fn meetai_library_scope_validation_rejects_unknown_and_malformed_fields() {
     let invalid_scopes = [
         serde_json::json!({
@@ -116,6 +149,36 @@ fn meetai_library_scope_validation_rejects_unknown_and_malformed_fields() {
             "schema": "meetai.scope.v1",
             "library": {"projectKey": "project"},
             "extra": true,
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v2",
+            "library": {"selections": []},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [{"kind": "personal", "libraryId": "forbidden"}]},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [
+                {"kind": "personal", "projectKeys": ["project-a"]},
+                {"kind": "personal", "documentIds": ["document-a"]}
+            ]},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [{"kind": "shared", "projectKeys": ["project-a"]}]},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [
+                {"kind": "shared", "libraryId": "library-a", "documentIds": ["document-a"]},
+                {"kind": "shared", "libraryId": "library-a", "projectKeys": ["project-a"]}
+            ]},
+        }),
+        serde_json::json!({
+            "schema": "meetai.scope.v2",
+            "library": {"selections": [{"kind": "shared", "libraryId": "library-a", "documentIds": ["document-a", "document-a"]}]},
         }),
     ];
 
