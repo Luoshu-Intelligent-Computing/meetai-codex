@@ -258,6 +258,7 @@ pub struct ResponsesApiRequest {
     pub tools: Option<ResponsesApiTools>,
     pub tool_choice: String,
     pub parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     pub store: bool,
     pub stream: bool,

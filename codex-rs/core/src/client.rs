@@ -182,6 +182,10 @@ fn reasoning_effort_for_request(effort: ReasoningEffortConfig) -> ReasoningEffor
     }
 }
 
+fn reasoning_disabled_for_request(reasoning: &Reasoning) -> bool {
+    matches!(reasoning.effort, Some(ReasoningEffortConfig::None))
+}
+
 fn session_telemetry_for_request(
     session_telemetry: &SessionTelemetry,
     request: &ResponsesApiRequest,
@@ -896,7 +900,14 @@ impl ModelClient {
             )
         };
         let reasoning = Self::build_reasoning(model_info, effort, summary);
-        let stream_options = (self.state.concurrent_reasoning_summaries_enabled
+        // `none` is an explicit request to disable reasoning. Some OpenAI-compatible
+        // local backends (including Qwen A3B) interpret the mere presence of a
+        // `reasoning` object as enabling thinking, even when its effort is `none`.
+        // Omit the object entirely so the provider receives the same wire shape as
+        // a normal non-thinking request.
+        let reasoning_disabled = reasoning_disabled_for_request(&reasoning);
+        let stream_options = (!reasoning_disabled
+            && self.state.concurrent_reasoning_summaries_enabled
             && is_openai
             && reasoning.summary.is_some())
         .then_some(StreamOptions {
@@ -928,7 +939,7 @@ impl ModelClient {
             tools,
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
-            reasoning: Some(reasoning),
+            reasoning: (!reasoning_disabled).then_some(reasoning),
             store: false,
             stream: true,
             stream_options,
