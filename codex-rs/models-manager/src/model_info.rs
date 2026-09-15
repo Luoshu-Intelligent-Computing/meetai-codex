@@ -244,7 +244,11 @@ fn meetai_qwen_3_6_model_info(slug: &str) -> ModelInfo {
         comp_hash: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
-        input_modalities: vec![InputModality::Text],
+        // The local Qwen backend accepts OpenAI Responses `input_image`
+        // content. Keep image input enabled so MCP image results are not
+        // replaced with the "image content omitted" placeholder before they
+        // reach the model.
+        input_modalities: vec![InputModality::Text, InputModality::Image],
         used_fallback_model_metadata: false,
         supports_search_tool: false,
         use_responses_lite: false,
