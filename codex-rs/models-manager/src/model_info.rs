@@ -244,7 +244,11 @@ fn meetai_qwen_3_6_model_info(slug: &str) -> ModelInfo {
         comp_hash: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
-        input_modalities: vec![InputModality::Text],
+        // The local Qwen deployment is backed by llama.cpp with an
+        // `mmproj.gguf` mounted alongside the model.  Register image input so
+        // Codex can expose its native `view_image` tool for projected PDF and
+        // Office evidence instead of treating the model as text-only.
+        input_modalities: vec![InputModality::Text, InputModality::Image],
         used_fallback_model_metadata: false,
         supports_search_tool: false,
         use_responses_lite: false,
