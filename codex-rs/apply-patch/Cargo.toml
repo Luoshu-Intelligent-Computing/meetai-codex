@@ -12,28 +12,18 @@ doctest = false
 [[bin]]
 name = "apply_patch"
 path = "src/main.rs"
-required-features = ["executor"]
-
-[[test]]
-name = "all"
-path = "tests/all.rs"
-required-features = ["executor"]
-
-[features]
-default = ["executor"]
-executor = ["dep:anyhow", "dep:codex-exec-server", "dep:similar", "dep:tokio"]
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true, optional = true }
-codex-exec-server = { workspace = true, optional = true }
+anyhow = { workspace = true }
+codex-exec-server = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
-similar = { workspace = true, optional = true }
+similar = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"], optional = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tree-sitter = { workspace = true }
 tree-sitter-bash = { workspace = true }
 

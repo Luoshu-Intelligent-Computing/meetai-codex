@@ -1,3 +1,6 @@
+#[path = "guardian_environments_tests.rs"]
+mod guardian_environments;
+
 use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
@@ -9,15 +12,17 @@ use codex_core::EnvironmentConfig;
 use codex_core::EnvironmentNetworkPolicy;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
 use codex_core::WaitForEnvironmentToolConfig;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
+use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::EnvironmentReadyInfo;
 use codex_exec_server::ExecServerError;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::NoiseChannelPublicKey;
@@ -37,7 +42,6 @@ use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_network_proxy::NetworkProxyConfig;
@@ -46,6 +50,8 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
@@ -67,6 +73,8 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
@@ -94,9 +102,11 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_target_windows;
+use core_test_support::startup::expect_startup;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
+use core_test_support::test_codex::environment_config_for_selection;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::test_env;
@@ -117,6 +127,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -157,13 +168,22 @@ impl ThreadLifecycleContributor<Config> for WaitForEnvironmentTestExtension {
     }
 }
 
-struct ReadyCapabilityRootsTestExtension;
+#[derive(Default)]
+struct ReadyCapabilityRootsTestExtension {
+    observed_roots: Option<Arc<Mutex<Vec<Vec<SelectedCapabilityRoot>>>>>,
+}
 
 impl ContextContributor for ReadyCapabilityRootsTestExtension {
     fn contribute_world_state<'a>(
         &'a self,
         input: WorldStateContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<WorldStateSectionContribution>> {
+        if let Some(observed_roots) = &self.observed_roots {
+            observed_roots
+                .lock()
+                .expect("observed capability roots should not be poisoned")
+                .push(input.ready_selected_capability_roots.to_vec());
+        }
         let root_ids = input
             .ready_selected_capability_roots
             .iter()
@@ -193,14 +213,7 @@ fn test_codex_with_wait_for_environment() -> TestCodexBuilder {
 }
 
 async fn unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
-    let mut builder = test_codex().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        let result = config.features.enable(Feature::UnifiedExec);
-        assert!(
-            result.is_ok(),
-            "unified exec should enable for test: {result:?}",
-        );
-    });
+    let mut builder = test_codex();
     builder.build_with_remote_and_local_env(server).await
 }
 
@@ -292,10 +305,15 @@ async fn remote_test_env_can_connect_and_use_filesystem() -> Result<()> {
     let payload = b"remote-test-env-ok".to_vec();
 
     file_system
-        .write_file(&file_path_uri, payload.clone(), /*sandbox*/ None)
+        .write_file(
+            &file_path_uri,
+            payload.clone(),
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await?;
     let actual = file_system
-        .read_file(&file_path_uri, /*sandbox*/ None)
+        .read_file(&file_path_uri, Default::default(), /*sandbox*/ None)
         .await?;
     assert_eq!(actual, payload);
 
@@ -305,6 +323,7 @@ async fn remote_test_env_can_connect_and_use_filesystem() -> Result<()> {
             RemoveOptions {
                 recursive: false,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -314,7 +333,7 @@ async fn remote_test_env_can_connect_and_use_filesystem() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_test_env_exposes_target_shell_to_model() -> Result<()> {
+async fn remote_test_env_exposes_target_shell_and_exec_guidance_to_model() -> Result<()> {
     skip_if_no_remote_env!(Ok(()));
 
     let server = start_mock_server().await;
@@ -327,19 +346,26 @@ async fn remote_test_env_exposes_target_shell_to_model() -> Result<()> {
         ]),
     )
     .await;
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .disable(Feature::UnifiedExec)
-            .expect("test config should allow feature update");
-    });
+    let mut builder = test_codex();
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("report remote environment").await?;
 
     let request = response_mock.single_request();
-    let tools = tool_names(&request.body_json());
-    assert!(!tools.contains(&"shell_command".to_string()));
+    let body = request.body_json();
+    let exec_command = body["tools"]
+        .as_array()
+        .context("tools should be an array")?
+        .iter()
+        .find(|tool| tool["name"] == "exec_command")
+        .context("exec_command should be available")?;
+    let has_windows_guidance = exec_command["description"]
+        .as_str()
+        .is_some_and(|description| description.contains("Windows safety rules:"));
+    assert_eq!(
+        has_windows_guidance,
+        matches!(test_target_os(), TestTargetOs::Windows)
+    );
     let environment_context = request
         .message_input_texts("user")
         .into_iter()
@@ -364,7 +390,7 @@ async fn remote_test_env_exposes_target_shell_to_model() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_remote_shell_runs_in_remote_cwd() -> Result<()> {
+async fn approved_remote_shell_runs_in_remote_cwd() -> Result<()> {
     const CALL_ID: &str = "remote-explicit-shell";
 
     skip_if_no_remote_env!(Ok(()));
@@ -387,15 +413,15 @@ async fn explicit_remote_shell_runs_in_remote_cwd() -> Result<()> {
         "shell": shell,
         "login": false,
         "yield_time_ms": 10_000,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Test target-native command approval cwd.",
     }))?;
     let mut builder = test_codex().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("test config should allow feature update");
+        config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+        config.approvals_reviewer = ApprovalsReviewer::User;
     });
     let test = builder.build_with_auto_env(&server).await?;
+    let selection = test.executor_environment().selection().clone();
     let response_mock = mount_sse_sequence(
         &server,
         vec![
@@ -413,16 +439,39 @@ async fn explicit_remote_shell_runs_in_remote_cwd() -> Result<()> {
     )
     .await;
 
-    test.submit_turn_with_environments(
+    submit_turn_with_approval_and_environments(
+        &test,
         "run the remote shell in the remote cwd",
-        Some(vec![TurnEnvironmentSelection {
-            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-            cwd: test.executor_environment().selection().cwd.clone(),
-            workspace_roots: vec![test.executor_environment().selection().cwd.clone()],
-            config: EnvironmentConfigState::FromThread,
-        }]),
+        vec![selection.clone()],
+        AskForApproval::OnRequest,
     )
     .await?;
+
+    let event = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    let EventMsg::ExecApprovalRequest(approval) = event else {
+        panic!("expected remote command approval before completion: {event:?}");
+    };
+    assert_eq!(
+        approval.cwd.to_inferred_path_uri().as_ref(),
+        Some(&selection.cwd)
+    );
+    test.codex
+        .submit(Op::ExecApproval {
+            id: approval.effective_approval_id(),
+            turn_id: Some(approval.turn_id),
+            decision: ReviewDecision::Approved,
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     let request = response_mock
         .last_request()
         .context("model should receive the command output")?;
@@ -451,11 +500,6 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("test config should allow feature update");
         config
             .permissions
             .set_permission_profile(PermissionProfile::workspace_write())
@@ -464,6 +508,13 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
     let test = builder.build_with_auto_env(&server).await?;
     let selection = test.executor_environment().selection().clone();
     let marker = selection.cwd.join(FILE_NAME)?;
+    let owner_active_profile = ActivePermissionProfile::new("owner-read-only");
+    let owner_profile_workspace_root = test.config.cwd.join("owner-profile-root");
+    let owner_permission_profile = PermissionProfileSnapshot::active_with_profile_workspace_roots(
+        PermissionProfile::read_only(),
+        owner_active_profile.clone(),
+        vec![owner_profile_workspace_root.clone().into()],
+    );
 
     let (shell, command) = match test_target_os() {
         TestTargetOs::Linux => (
@@ -549,30 +600,64 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
                 vec![TurnEnvironmentSelection {
                     config: EnvironmentConfigState::Ready(EnvironmentConfig {
                         allow_login_shell: test.config.permissions.allow_login_shell,
-                        permission_profile: PermissionProfileSnapshot::legacy(
-                            PermissionProfile::read_only(),
-                        ),
+                        workspace_roots: selection.workspace_roots.clone(),
+                        permission_profile: owner_permission_profile,
                         shell_environment_policy: Default::default(),
+                        windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                        windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+                        use_legacy_landlock: test.config.features.use_legacy_landlock(),
                         exec_policy: None,
                         mcp_policy: None,
                         network_policy: None,
                         selected_capability_roots: Vec::new(),
                     }),
-                    ..selection
+                    ..selection.clone()
                 }],
             )),
             ..Default::default()
         },
     )
     .await?;
-    submit_thread_settings(
-        &test.codex,
-        ThreadSettingsOverrides {
-            permission_profile: Some(PermissionProfile::workspace_write()),
-            ..Default::default()
-        },
-    )
-    .await?;
+    test.codex
+        .submit(Op::ThreadSettings {
+            thread_settings: ThreadSettingsOverrides {
+                permission_profile: Some(PermissionProfile::workspace_write()),
+                ..Default::default()
+            },
+            reply: None,
+        })
+        .await?;
+    let persisted_settings = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ThreadSettingsApplied(event) => Some(event.thread_settings.clone()),
+        _ => None,
+    })
+    .await;
+    let snapshot = test.codex.config_snapshot().await;
+    assert_eq!(snapshot.permission_profile, PermissionProfile::read_only());
+    assert_eq!(
+        snapshot.active_permission_profile,
+        Some(owner_active_profile.clone())
+    );
+    assert_eq!(
+        snapshot.profile_workspace_roots,
+        vec![owner_profile_workspace_root.clone().into()]
+    );
+    assert_eq!(
+        persisted_settings,
+        test.codex.thread_settings_snapshot().await
+    );
+    assert_ne!(
+        persisted_settings.active_permission_profile,
+        snapshot.active_permission_profile
+    );
+    test.codex
+        .restore_thread_settings(test.codex.restorable_thread_settings().await)
+        .await?;
+    let (mcp_config, _) = test.codex.current_mcp_config_and_runtime_context().await;
+    assert_eq!(
+        mcp_config.permission_profile,
+        PermissionProfile::workspace_write()
+    );
     test.submit_text_turn("try to write a file with owner-provided permissions")
         .await?;
 
@@ -588,12 +673,138 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
     assert!(!output.contains("WRITE_SUCCEEDED"));
     assert!(
         test.fs()
-            .read_file_text(&marker, /*sandbox*/ None)
+            .read_file_text(&marker, Default::default(), /*sandbox*/ None)
             .await
             .is_err(),
         "read-only attachment unexpectedly wrote {FILE_NAME}"
     );
+    let turn_context = test
+        .codex
+        .load_history(/*include_archived*/ false)
+        .await?
+        .items
+        .into_iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::TurnContext(context) => Some(context),
+            _ => None,
+        })
+        .context("owner turn context")?;
+    assert!(
+        turn_context
+            .workspace_roots
+            .as_ref()
+            .is_some_and(|roots| roots.contains(&owner_profile_workspace_root))
+    );
+    assert_eq!(
+        (
+            turn_context.permission_profile,
+            turn_context.active_permission_profile
+        ),
+        (
+            Some(PermissionProfile::read_only()),
+            Some(owner_active_profile)
+        )
+    );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executor_profile_roots_survive_settings_restore_and_turn_recording() -> Result<()> {
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.workspace_roots = vec![config.cwd.clone()];
+            config
+                .permissions
+                .set_workspace_roots(config.workspace_roots.clone());
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let runtime_roots = test.codex.config_snapshot().await.workspace_roots;
+    // Include a foreign convention on every host, plus case-distinct Windows roots.
+    let roots = [
+        "file:///workspace/profile",
+        "file:///C:/Work/Profile",
+        "file:///C:/work/profile",
+        "file://server/share/profile",
+    ]
+    .map(|root| PathUri::parse(root).unwrap());
+    let profile = PermissionProfile::workspace_write_with_path_uris(
+        &roots,
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let expected_profile = profile.clone().materialize_project_roots_with_path_uris(
+        &test.executor_environment().selection().workspace_roots,
+    );
+    let profile_roots = roots.into_iter().map(Into::into).collect::<Vec<_>>();
+    let active_profile = ActivePermissionProfile::new("executor");
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            permission_profile: Some(profile.clone()),
+            active_permission_profile: Some(active_profile.clone()),
+            profile_workspace_roots: Some(profile_roots.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let saved = test.codex.restorable_thread_settings().await;
+    assert_eq!(saved.profile_workspace_roots, Some(profile_roots.clone()));
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            permission_profile: Some(profile),
+            profile_workspace_roots: Some(Vec::new()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert!(
+        test.codex
+            .config_snapshot()
+            .await
+            .profile_workspace_roots
+            .is_empty()
+    );
+    test.codex.restore_thread_settings(saved).await?;
+    let snapshot = test.codex.config_snapshot().await;
+    assert_eq!(
+        (snapshot.profile_workspace_roots, snapshot.workspace_roots),
+        (profile_roots, runtime_roots)
+    );
+
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    test.submit_text_turn("record the executor profile").await?;
+    response_mock.single_request();
+    test.codex.flush_rollout().await?;
+    let context = test
+        .codex
+        .load_history(/*include_archived*/ false)
+        .await?
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            RolloutItem::TurnContext(context) => Some(context),
+            _ => None,
+        })
+        .context("recorded turn context")?;
+    // The rollout retains compiled permissions, not the unprojectable root list.
+    assert_eq!(
+        (
+            context.permission_profile,
+            context.active_permission_profile,
+            context.workspace_roots
+        ),
+        (Some(expected_profile), Some(active_profile), None)
+    );
     Ok(())
 }
 
@@ -796,10 +1007,156 @@ async fn settings_update_does_not_retarget_active_turn_environment() -> Result<(
     Ok(())
 }
 
+#[test_case(false; "configuration supplied with the selection")]
+#[test_case(true; "configuration arrives after the selection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_environment_update_waits_for_a_configured_executor_to_connect(
+    configuration_arrives_later: bool,
+) -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let exec_server_url = format!("ws://{}", listener.local_addr()?);
+    let (attach, connection) = tokio::sync::oneshot::channel();
+    let (shutdown, stop) = tokio::sync::oneshot::channel();
+    let executor = tokio::spawn(serve_environment_with_agents_md(
+        listener, "", connection, stop,
+    ));
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_function_call(
+                    "pause-for-switch",
+                    "request_user_input",
+                    &json!({"questions": [{
+                        "id": "continue", "header": "Continue", "question": "Continue?",
+                        "options": [
+                            {"label": "Yes", "description": "Continue the test."},
+                            {"label": "No", "description": "Stop the test."}
+                        ]
+                    }]})
+                    .to_string(),
+                ),
+                ev_completed("first"),
+            ]),
+            sse(vec![ev_completed("second")]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.project_doc_max_bytes = 0;
+        assert!(config.features.disable(Feature::DeferredExecutor).is_ok());
+        assert!(
+            config
+                .features
+                .enable(Feature::DefaultModeRequestUserInput)
+                .is_ok()
+        );
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let remote_environment_id = "connecting";
+    test.thread_manager
+        .environment_manager()
+        .upsert_environment(
+            remote_environment_id.to_string(),
+            exec_server_url,
+            /*connect_timeout*/ None,
+        )?;
+    let remote_cwd = test
+        .executor_environment()
+        .selection()
+        .cwd
+        .join("remote-workspace")?;
+    let mut remote_selection = TurnEnvironmentSelection {
+        environment_id: remote_environment_id.to_string(),
+        cwd: remote_cwd.clone(),
+        workspace_roots: vec![remote_cwd.clone()],
+        config: EnvironmentConfigState::Pending,
+    };
+    let owner_config = environment_config_for_selection(&test.config, &remote_selection);
+    if !configuration_arrives_later {
+        remote_selection.config = EnvironmentConfigState::Ready(owner_config.clone());
+    }
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "pause before switching".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let request = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    test.codex
+        .submit(Op::TurnSettings {
+            turn_id: request.turn_id.clone(),
+            update: TurnSettingsUpdate {
+                environments: Some(vec![remote_selection.clone()]),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await?;
+    assert_eq!(outcome.await?, TurnSettingsUpdateOutcome::Applied);
+    if configuration_arrives_later {
+        test.codex
+            .environment_ready(&remote_selection, owner_config)
+            .await?;
+    }
+    test.codex
+        .submit(Op::UserInputAnswer {
+            id: request.turn_id,
+            response: RequestUserInputResponse {
+                answers: HashMap::from([(
+                    "continue".to_string(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Yes".to_string()],
+                    },
+                )]),
+            },
+        })
+        .await?;
+
+    assert!(
+        timeout(
+            Duration::from_secs(/*secs*/ 1),
+            wait_for_response_request_count(&responses, /*expected_count*/ 2)
+        )
+        .await
+        .is_err(),
+        "the follow-up must not run before the configured executor connects"
+    );
+    attach.send(()).expect("release executor startup");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let requests = responses.requests();
+    let context = requests[1]
+        .message_input_texts("user")
+        .into_iter()
+        .rfind(|text| text.contains("<environment_context>"))
+        .context("remote environment should be model visible")?;
+    assert!(context.contains(&format!(
+        "<cwd>{}</cwd>",
+        remote_cwd.inferred_native_path_string()
+    )));
+    assert!(!context.contains("<status>starting</status>"));
+
+    let _ = shutdown.send(());
+    executor.await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_executor_promotes_primary_environment_when_startup_completes() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let server = start_mock_server().await;
+    let apps = core_test_support::apps_test_server::AppsTestServer::mount(&server).await?;
+    let mcp_url = format!("{}/api/codex/ps/mcp", apps.chatgpt_base_url);
     let response_mock = mount_sse_sequence(
         &server,
         vec![
@@ -841,7 +1198,20 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     .await;
     let mut builder = test_codex()
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
-        .with_config(|config| {
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_config(move |config| {
+            config
+                .mcp_servers
+                .set(HashMap::from([(
+                    "deferred".to_string(),
+                    serde_json::from_value(json!({
+                        "url": mcp_url,
+                        "environment_id": REMOTE_ENVIRONMENT_ID,
+                        "startup_timeout_sec": 60,
+                    }))
+                    .expect("MCP server config"),
+                )]))
+                .expect("set MCP server");
             config.project_doc_max_bytes = 0;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
             assert!(
@@ -895,8 +1265,56 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     assert!(initial_context.contains("<environment id=\"local\" primary=\"true\">"));
     assert!(initial_context.contains("<environment id=\"remote\" primary=\"false\">"));
     assert!(initial_context.contains("<status>starting</status>"));
+    assert!(
+        requests[1]
+            .tool_by_name("mcp__deferred", "calendar_list_events")
+            .is_none()
+    );
 
-    serve_environment_info(listener).await;
+    let mut websocket = accept_initialized_exec_server(listener).await;
+    // Forward MCP HTTP through the fake executor while keeping startup under test control.
+    let http_client =
+        codex_exec_server::Environment::create_for_tests(/*exec_server_url*/ None)?
+            .get_http_client();
+    let executor = tokio::spawn(async move {
+        loop {
+            let request = read_exec_server_json(&mut websocket).await;
+            let Some(id) = request.get("id") else {
+                continue;
+            };
+            let mut messages = Vec::new();
+            if request["method"] == "http/request" {
+                let params = serde_json::from_value(request["params"].clone()).unwrap();
+                let mut response =
+                    serde_json::to_value(http_client.http_request(params).await.unwrap()).unwrap();
+                if request["params"]["streamResponse"] == true {
+                    let body = response["bodyBase64"].take();
+                    response["bodyBase64"] = json!("");
+                    messages.push(json!({
+                        "method": "http/request/bodyDelta",
+                        "params": { "requestId": request["params"]["requestId"], "seq": 1,
+                            "deltaBase64": body, "done": true }
+                    }));
+                }
+                messages.insert(0, json!({ "id": id, "result": response }));
+            } else if request["method"] == "environment/info" {
+                messages.push(json!({ "id": id,
+                    "result": { "shell": { "name": "zsh", "path": "/bin/zsh" } }
+                }));
+            } else {
+                messages.push(
+                    json!({ "id": id, "error": { "code": -32601, "message": "unsupported" } }),
+                );
+            }
+            for message in messages {
+                websocket
+                    .send(Message::Text(message.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    core_test_support::wait_for_mcp_server(&test.codex, "deferred").await?;
     test.codex
         .submit(Op::UserInputAnswer {
             id: request.turn_id,
@@ -916,6 +1334,11 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     .await;
 
     let requests = response_mock.requests();
+    assert!(
+        requests[2]
+            .tool_by_name("mcp__deferred", "calendar_list_events")
+            .is_some()
+    );
     let updated_context = requests[2]
         .message_input_texts("user")
         .into_iter()
@@ -930,7 +1353,7 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     let rollout = fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
     let world_state_patch = rollout
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<serde_json::Result<Vec<_>>>()?
         .into_iter()
         .filter_map(|line| match line.item {
@@ -946,6 +1369,8 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
         Some(&Value::Null)
     );
 
+    executor.abort();
+    let _ = executor.await;
     Ok(())
 }
 
@@ -1106,16 +1531,26 @@ impl NoiseRendezvousConnectProvider for FailingNoiseConnectProvider {
     }
 }
 
-struct ReadyNoiseConnectProvider {
+struct OfflineThenReadyNoiseConnectProvider {
     websocket_url: String,
     executor_public_key: NoiseChannelPublicKey,
+    calls: AtomicUsize,
 }
 
-impl NoiseRendezvousConnectProvider for ReadyNoiseConnectProvider {
+impl NoiseRendezvousConnectProvider for OfflineThenReadyNoiseConnectProvider {
     fn connect_bundle(
         &self,
         _: NoiseChannelPublicKey,
     ) -> BoxFuture<'_, std::result::Result<NoiseRendezvousConnectBundle, ExecServerError>> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Box::pin(async {
+                Err(ExecServerError::EnvironmentRegistryHttp {
+                    status: http::StatusCode::CONFLICT,
+                    code: Some("environment_offline".to_string()),
+                    message: "test environment is offline".to_string(),
+                })
+            });
+        }
         let bundle = NoiseRendezvousConnectBundle {
             websocket_url: self.websocket_url.clone(),
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
@@ -1147,13 +1582,8 @@ async fn wait_for_response_request_count(response_mock: &ResponseMock, expected_
 async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment() -> Result<()> {
     let server = start_mock_server().await;
     let mut extensions = ExtensionRegistryBuilder::new();
-    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension));
-    let mut builder = test_codex()
-        .with_extensions(Arc::new(extensions.build()))
-        .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
-            assert!(config.features.enable(Feature::UnifiedExec).is_ok());
-        });
+    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension::default()));
+    let mut builder = test_codex().with_extensions(Arc::new(extensions.build()));
     let test = builder.build_with_auto_env(&server).await?;
     let selection = test
         .codex
@@ -1176,8 +1606,12 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
         EnvironmentConfigState::Pending,
         EnvironmentConfigState::Ready(EnvironmentConfig {
             allow_login_shell: false,
+            workspace_roots: selection.workspace_roots.clone(),
             permission_profile: permission_profile.clone(),
             shell_environment_policy: Default::default(),
+            windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+            windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+            use_legacy_landlock: test.config.features.use_legacy_landlock(),
             exec_policy: None,
             mcp_policy: None,
             network_policy: None,
@@ -1214,8 +1648,12 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
             environments: Some(vec![TurnEnvironmentSelection {
                 config: EnvironmentConfigState::Ready(EnvironmentConfig {
                     allow_login_shell: true,
+                    workspace_roots: selection.workspace_roots.clone(),
                     permission_profile: permission_profile.clone(),
                     shell_environment_policy: Default::default(),
+                    windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                    windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+                    use_legacy_landlock: test.config.features.use_legacy_landlock(),
                     exec_policy: None,
                     mcp_policy: None,
                     network_policy: None,
@@ -1236,8 +1674,12 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                 vec![TurnEnvironmentSelection {
                     config: EnvironmentConfigState::Ready(EnvironmentConfig {
                         allow_login_shell: false,
+                        workspace_roots: selection.workspace_roots.clone(),
                         permission_profile: permission_profile.clone(),
                         shell_environment_policy: Default::default(),
+                        windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                        windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+                        use_legacy_landlock: test.config.features.use_legacy_landlock(),
                         exec_policy: None,
                         mcp_policy: None,
                         network_policy: None,
@@ -1251,10 +1693,6 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
     )
     .await?;
 
-    assert_eq!(
-        test.codex.inspect_selected_capability_roots().ready_roots,
-        vec![root("first-root")]
-    );
     assert_eq!(
         second
             .thread
@@ -1297,8 +1735,12 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                     vec![TurnEnvironmentSelection {
                         config: EnvironmentConfigState::Ready(EnvironmentConfig {
                             allow_login_shell: false,
+                            workspace_roots: selection.workspace_roots.clone(),
                             permission_profile: permission_profile.clone(),
                             shell_environment_policy: Default::default(),
+                            windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                            windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+                            use_legacy_landlock: test.config.features.use_legacy_landlock(),
                             exec_policy: None,
                             mcp_policy: None,
                             network_policy: None,
@@ -1315,6 +1757,10 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
         wait_for_event(thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     }
 
+    assert_eq!(
+        test.codex.inspect_selected_capability_roots().ready_roots,
+        vec![root("first-updated-root")]
+    );
     let requests = response_mock.requests();
     let root_fragments = requests
         .iter()
@@ -1357,7 +1803,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn owner_network_policy_is_rejected_until_runtime_enforcement_exists() -> Result<()> {
+async fn owner_network_policy_rejects_unsupported_environment_authority() -> Result<()> {
     let server = start_mock_server().await;
     let test = test_codex().build_with_auto_env(&server).await?;
     let selections = test.codex.environment_selections().await;
@@ -1366,10 +1812,12 @@ async fn owner_network_policy_is_rejected_until_runtime_enforcement_exists() -> 
         .context("thread should select its executor environment")?;
     let owner_config = EnvironmentConfig {
         allow_login_shell: test.config.permissions.allow_login_shell,
-        permission_profile: PermissionProfileSnapshot::legacy(
-            test.config.permissions.permission_profile().clone(),
-        ),
+        workspace_roots: selection.workspace_roots.clone(),
+        permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
         shell_environment_policy: test.config.permissions.shell_environment_policy.clone(),
+        windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+        windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+        use_legacy_landlock: test.config.features.use_legacy_landlock(),
         exec_policy: None,
         mcp_policy: None,
         network_policy: Some(EnvironmentNetworkPolicy::from_config(
@@ -1392,15 +1840,23 @@ async fn owner_network_policy_is_rejected_until_runtime_enforcement_exists() -> 
         })
         .await
         .err()
-        .context("preview must not accept an unenforced policy")?;
+        .context("preview must not accept an unsupported environment policy")?;
     let ready_error = test
         .codex
         .environment_ready(selection, owner_config)
         .await
-        .expect_err("readiness must not accept an unenforced policy");
+        .expect_err("readiness must not accept an unsupported environment policy");
 
+    let expected = if selection.environment_id == LOCAL_ENVIRONMENT_ID {
+        "attachment-owned network policy requires a remote executor"
+    } else {
+        "environment network policy requires managed network enforcement"
+    };
     for error in [preview_error.to_string(), ready_error.to_string()] {
-        assert!(error.contains("attachment-owned network policy is not supported yet"));
+        assert!(
+            error.contains(expected),
+            "unexpected validation error: {error}"
+        );
     }
     assert_eq!(test.codex.environment_selections().await, selections);
     Ok(())
@@ -1413,13 +1869,11 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     let server = start_mock_server().await;
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.thread_lifecycle_contributor(Arc::new(WaitForEnvironmentTestExtension));
-    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension));
+    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension::default()));
     let mut builder = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
-            assert!(config.features.enable(Feature::UnifiedExec).is_ok());
             config
                 .permissions
                 .set_permission_profile(PermissionProfile::read_only())
@@ -1437,6 +1891,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         config: EnvironmentConfigState::Pending,
         ..selection.clone()
     };
+    let owner_workspace_root = selection.cwd.join("owner-workspace")?;
     let root = |id: &str| SelectedCapabilityRoot {
         id: id.to_string(),
         location: CapabilityRootLocation::Environment {
@@ -1446,8 +1901,12 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     };
     let owner_config = |id: &str, allow_login_shell: bool| EnvironmentConfig {
         allow_login_shell,
+        workspace_roots: vec![selection.cwd.clone(), owner_workspace_root.clone()],
         permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
         shell_environment_policy: Default::default(),
+        windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+        windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+        use_legacy_landlock: test.config.features.use_legacy_landlock(),
         exec_policy: None,
         mcp_policy: None,
         network_policy: None,
@@ -1462,6 +1921,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     let waiting = timeout(Duration::from_secs(5), start_pending_thread())
         .await
         .context("pending thread startup should not block")??;
+    let requested_workspace_roots = waiting.thread.config_snapshot().await.workspace_roots;
     let independent = start_pending_thread().await?;
     let failed = start_pending_thread().await?;
 
@@ -1516,6 +1976,14 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         .thread
         .environment_failed(&pending_selection, "configuration unavailable".to_string())
         .await?;
+    for (thread, configured) in [
+        (&waiting.thread, false),
+        (&independent.thread, true),
+        (&failed.thread, false),
+    ] {
+        let snapshot = thread.config_snapshot().await;
+        assert_eq!(snapshot.is_primary_environment_configured(), configured);
+    }
     assert_eq!(
         failed.thread.environment_selections().await,
         vec![TurnEnvironmentSelection {
@@ -1569,30 +2037,31 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         config: EnvironmentConfigState::Ready(waiting_config.clone()),
         ..pending_selection.clone()
     };
-    submit_thread_settings(
-        &waiting.thread,
-        ThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentSelections::new(
-                test.config.cwd.clone(),
-                vec![ready_selection.clone()],
-            )),
-            ..Default::default()
-        },
-    )
-    .await?;
+    waiting
+        .thread
+        .environment_ready(&pending_selection, waiting_config)
+        .await?;
     wait_for_response_request_count(&response_mock, /*expected_count*/ 2).await;
     assert_eq!(
         waiting.thread.environment_selections().await,
         vec![ready_selection]
     );
+    assert_eq!(
+        waiting.thread.config_snapshot().await.workspace_roots,
+        requested_workspace_roots
+    );
 
     let ready_request = response_mock
         .last_request()
         .context("waiting turn should resume")?;
-    let (_, wait_succeeded) = ready_request
+    let (wait_output, wait_succeeded) = ready_request
         .function_call_output_content_and_success(WAIT_CALL_ID)
         .context("wait_for_environment output should be model visible")?;
     assert_ne!(wait_succeeded, Some(false));
+    assert_eq!(
+        serde_json::from_str::<Value>(&wait_output.context("wait output should contain JSON")?)?,
+        json!({ "environment_id": selection.environment_id, "status": "ready" })
+    );
     let body = ready_request.body_json();
     let exec_command = body["tools"]
         .as_array()
@@ -1611,6 +2080,13 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
             .into_iter()
             .rfind(|text| text.contains("<ready_capability_roots>")),
         Some("<ready_capability_roots>waiting-root</ready_capability_roots>".to_string())
+    );
+    assert!(
+        ready_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains(&owner_workspace_root.inferred_native_path_string())),
+        "waiting turn should observe owner-resolved workspace roots"
     );
 
     let recovered_selection = TurnEnvironmentSelection {
@@ -1639,9 +2115,268 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn future_pending_environment_can_finish_without_retargeting_the_active_turn() -> Result<()> {
+    let server = start_mock_server().await;
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(Arc::new(WaitForEnvironmentTestExtension));
+    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension::default()));
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    let selection = test.codex.environment_selections().await.remove(0);
+    let active = TurnEnvironmentSelection {
+        config: EnvironmentConfigState::Pending,
+        ..selection
+    };
+    let future_cwd = active.cwd.join("future-environment")?;
+    test.fs()
+        .create_directory(
+            &future_cwd,
+            CreateDirectoryOptions {
+                recursive: false,
+                follow_symlinks: true,
+            },
+            /*sandbox*/ None,
+        )
+        .await?;
+    let future = TurnEnvironmentSelection {
+        cwd: future_cwd.clone(),
+        workspace_roots: vec![future_cwd],
+        ..active.clone()
+    };
+    let owner_config = |selection: &TurnEnvironmentSelection, id: &str| EnvironmentConfig {
+        allow_login_shell: test.config.permissions.allow_login_shell,
+        workspace_roots: selection.workspace_roots.clone(),
+        permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
+        shell_environment_policy: Default::default(),
+        windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+        windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+        use_legacy_landlock: test.config.features.use_legacy_landlock(),
+        exec_policy: None,
+        mcp_policy: None,
+        network_policy: None,
+        selected_capability_roots: vec![SelectedCapabilityRoot {
+            id: id.to_string(),
+            location: CapabilityRootLocation::Environment {
+                environment_id: selection.environment_id.clone(),
+                path: selection.cwd.clone(),
+            },
+        }],
+    };
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![active.clone()]),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_function_call(
+                    "wait-for-active-environment",
+                    "wait_for_environment",
+                    &json!({ "environment_id": active.environment_id }).to_string(),
+                ),
+                ev_completed("waiting"),
+            ]),
+            sse(vec![ev_completed("active-done")]),
+            sse(vec![ev_completed("future-done")]),
+        ],
+    )
+    .await;
+    let request = |text: &str| {
+        TurnInputRequest::user_input(vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }])
+    };
+    thread.start_or_steer_turn(request("wait")).await?;
+    wait_for_response_request_count(&response_mock, /*expected_count*/ 1).await;
+    assert!(matches!(
+        thread
+            .start_or_steer_turn(
+                request("use the other environment next turn").with_thread_settings(
+                    ThreadSettingsOverrides {
+                        environments: Some(TurnEnvironmentSelections::new(
+                            test.config.cwd.clone(),
+                            vec![future.clone()],
+                        )),
+                        ..Default::default()
+                    },
+                )
+            )
+            .await?,
+        TurnInputSubmission::Steered { .. }
+    ));
+    thread
+        .environment_ready(&future, owner_config(&future, "future-root"))
+        .await?;
+    assert!(matches!(
+        thread.environment_selections().await[0].config,
+        EnvironmentConfigState::Ready(_)
+    ));
+    thread
+        .environment_ready(&active, owner_config(&active, "active-root"))
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    thread.start_or_steer_turn(request("next turn")).await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = response_mock.requests();
+    let (output, _) = requests[1]
+        .function_call_output_content_and_success("wait-for-active-environment")
+        .context("active wait output should be model visible")?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.context("active wait output should contain JSON")?)?,
+        json!({ "environment_id": active.environment_id, "status": "ready" })
+    );
+    let ready_roots = requests[1..]
+        .iter()
+        .map(|request| {
+            request
+                .message_input_texts("user")
+                .into_iter()
+                .rfind(|text| text.contains("<ready_capability_roots>"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ready_roots,
+        ["active-root", "future-root"].map(|root| Some(format!(
+            "<ready_capability_roots>{root}</ready_capability_roots>"
+        )))
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_environment_update_wakes_the_old_wait_with_the_new_selection() -> Result<()> {
+    let server = start_mock_server().await;
+    let mut builder = test_codex_with_wait_for_environment().with_config(|config| {
+        assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
+        assert!(config.features.disable(Feature::StepModelSwitching).is_ok());
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let mut original = test.codex.environment_selections().await.remove(0);
+    original.config = EnvironmentConfigState::Pending;
+    let switched_cwd = original.cwd.join("active-environment")?;
+    test.fs()
+        .create_directory(
+            &switched_cwd,
+            CreateDirectoryOptions {
+                recursive: false,
+                follow_symlinks: true,
+            },
+            /*sandbox*/ None,
+        )
+        .await?;
+    let switched = TurnEnvironmentSelection {
+        cwd: switched_cwd.clone(),
+        workspace_roots: vec![switched_cwd],
+        ..original.clone()
+    };
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![original.clone()]),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
+    let wait = |id: &str| {
+        sse(vec![
+            ev_function_call(
+                id,
+                "wait_for_environment",
+                &json!({ "environment_id": original.environment_id }).to_string(),
+            ),
+            ev_completed(id),
+        ])
+    };
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            wait("wait-for-original"),
+            wait("wait-for-switched"),
+            sse(vec![ev_completed("active-done")]),
+        ],
+    )
+    .await;
+    let TurnInputSubmission::Started { turn_id } = thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "use the selected environment".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?
+    else {
+        anyhow::bail!("expected to start a turn");
+    };
+    wait_for_response_request_count(&responses, /*expected_count*/ 1).await;
+
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    thread
+        .submit(Op::TurnSettings {
+            turn_id,
+            update: TurnSettingsUpdate {
+                environments: Some(vec![switched.clone()]),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await?;
+    assert_eq!(outcome.await?, TurnSettingsUpdateOutcome::Applied);
+    wait_for_response_request_count(&responses, /*expected_count*/ 2).await;
+    thread
+        .environment_ready(
+            &switched,
+            environment_config_for_selection(&test.config, &switched),
+        )
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    let wait_output = |request: &ResponsesRequest, id| -> Result<String> {
+        let (output, _) = request
+            .function_call_output_content_and_success(id)
+            .context("wait output should be model visible")?;
+        output.context("wait output should contain text")
+    };
+    assert!(wait_output(&requests[1], "wait-for-original")?.contains("configuration was canceled"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&wait_output(&requests[2], "wait-for-switched")?)?,
+        json!({ "environment_id": original.environment_id, "status": "ready" })
+    );
+    for (request, selection, is_starting) in [
+        (&requests[0], &original, true),
+        (&requests[1], &switched, true),
+        (&requests[2], &switched, false),
+    ] {
+        let context = request
+            .message_input_texts("user")
+            .into_iter()
+            .rfind(|text| text.contains("<environment_context>"))
+            .context("environment context should be model visible")?;
+        assert!(context.contains(&format!(
+            "<cwd>{}</cwd>",
+            selection.cwd.inferred_native_path_string()
+        )));
+        assert_eq!(context.contains("<status>starting</status>"), is_starting);
+    }
+    Ok(())
+}
+
+#[test_case(true; "uses refreshed executor root")]
+#[test_case(false; "preserves persisted root when executor reports none")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ready_before_selection_exposes_remote_tools_and_capability_context_after_wait()
--> Result<()> {
+async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wait(
+    executor_reports_refreshed_root: bool,
+) -> Result<()> {
     const WAIT_CALL_ID: &str = "wait-ready-before-selection";
 
     let rendezvous = TcpListener::bind("127.0.0.1:0").await?;
@@ -1669,7 +2404,7 @@ async fn ready_before_selection_exposes_remote_tools_and_capability_context_afte
         .mount(&registry)
         .await;
 
-    let runtime_paths = ExecServerRuntimePaths::new(
+    let runtime_paths = ExecServerRuntimeOptions::new(
         std::env::current_exe()?,
         /*codex_linux_sandbox_exe*/ None,
     )?;
@@ -1725,37 +2460,56 @@ async fn ready_before_selection_exposes_remote_tools_and_capability_context_afte
         ],
     )
     .await;
+    let observed_roots = Arc::new(Mutex::new(Vec::new()));
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.thread_lifecycle_contributor(Arc::new(WaitForEnvironmentTestExtension));
-    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension));
+    extensions.prompt_contributor(Arc::new(ReadyCapabilityRootsTestExtension {
+        observed_roots: Some(Arc::clone(&observed_roots)),
+    }));
     let mut builder = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
             config.project_doc_max_bytes = 0;
-            config.use_experimental_unified_exec_tool = true;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
-            assert!(config.features.enable(Feature::UnifiedExec).is_ok());
         });
     let test = builder.build(&server).await?;
-    let ready_root = SelectedCapabilityRoot {
+    let refreshed_root = SelectedCapabilityRoot {
         id: "ready-first-root".to_string(),
         location: CapabilityRootLocation::Environment {
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
             path: PathUri::parse("file:///ready-first-root")?,
         },
     };
+    let stale_root = SelectedCapabilityRoot {
+        id: refreshed_root.id.clone(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            path: PathUri::parse("file:///stale-ready-first-root")?,
+        },
+    };
+    let expected_root = if executor_reports_refreshed_root {
+        refreshed_root.clone()
+    } else {
+        stale_root.clone()
+    };
+    let provider = Arc::new(OfflineThenReadyNoiseConnectProvider {
+        websocket_url: format!("{rendezvous_url}/relay?role=harness"),
+        executor_public_key,
+        calls: AtomicUsize::new(0),
+    });
     let environment = test
         .thread_manager
         .environment_manager()
         .report_environment_provisioning_status(
             REMOTE_ENVIRONMENT_ID.to_string(),
             Ok(EnvironmentReadyInfo {
-                selected_capability_roots: Vec::new(),
+                selected_capability_roots: if executor_reports_refreshed_root {
+                    vec![refreshed_root.clone()]
+                } else {
+                    Vec::new()
+                },
             }),
-            Arc::new(ReadyNoiseConnectProvider {
-                websocket_url: format!("{rendezvous_url}/relay?role=harness"),
-                executor_public_key,
-            }),
+            provider.clone(),
         )?
         .context("Ready-first report should create the environment")?;
 
@@ -1788,29 +2542,49 @@ async fn ready_before_selection_exposes_remote_tools_and_capability_context_afte
         anyhow::Ok(())
     });
 
-    test.submit_turn_with_environments(
-        "use the ready environment",
-        Some(vec![TurnEnvironmentSelection {
-            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-            cwd: PathUri::from_abs_path(&test.config.cwd),
-            workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
-            config: EnvironmentConfigState::Ready(EnvironmentConfig {
-                allow_login_shell: true,
-                permission_profile: PermissionProfileSnapshot::legacy(
-                    test.config.permissions.permission_profile().clone(),
-                ),
-                shell_environment_policy: Default::default(),
-                exec_policy: None,
-                mcp_policy: None,
-                network_policy: None,
-                selected_capability_roots: vec![ready_root],
-            }),
-        }]),
-    )
-    .await?;
+    let selection = TurnEnvironmentSelection {
+        environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&test.config.cwd),
+        workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
+        config: EnvironmentConfigState::FromThread,
+    };
+    let mut thread_extension_init = ExtensionDataInit::new();
+    thread_extension_init.insert(vec![stale_root]);
+    let resumed = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![selection.clone()]),
+            thread_extension_init,
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+    resumed
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "use the ready environment".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&resumed.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_eq!(
+        resumed.thread.environment_selections().await,
+        vec![selection]
+    );
+    assert_eq!(
+        resumed
+            .thread
+            .inspect_selected_capability_roots()
+            .ready_roots,
+        vec![expected_root.clone()]
+    );
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
     // Provisioning was reported ready before selection, but selection materialization remains
     // nonblocking while the transport starts.
     // The first request may legally see either Starting or Ready; the wait makes step two ready.
@@ -1851,6 +2625,14 @@ async fn ready_before_selection_exposes_remote_tools_and_capability_context_afte
             .iter()
             .any(|text| text.contains("<ready_capability_roots>ready-first-root"))
     );
+    let observed_selected_roots = observed_roots
+        .lock()
+        .expect("observed capability roots should not be poisoned")
+        .iter()
+        .rfind(|roots| roots.iter().any(|root| root.id == expected_root.id))
+        .cloned()
+        .context("selected capability root should reach world state")?;
+    assert_eq!(observed_selected_roots, vec![expected_root]);
 
     relay.abort();
     remote_environment.abort();
@@ -1880,13 +2662,9 @@ async fn deferred_executor_stays_pending_after_materialization() -> Result<()> {
     )
     .await;
     let mut builder = test_codex_with_wait_for_environment().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
         assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
-        assert!(config.features.enable(Feature::UnifiedExec).is_ok());
     });
-    let test = timeout(Duration::from_secs(5), builder.build(&server))
-        .await
-        .context("thread startup should not wait for the remote environment")??;
+    let test = expect_startup(builder.build(&server)).await;
     let environment_manager = test.thread_manager.environment_manager();
     let provider = Arc::new(FailingNoiseConnectProvider::default());
     environment_manager.materialize_pending_noise_environment(
@@ -2002,10 +2780,25 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
         ],
     )
     .await;
+    // If the child finishes after the parent's last request, its completion
+    // notification triggers one more parent request. Allow either ordering.
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-child-completion"),
+            ev_assistant_message("msg-child-completion", "done"),
+            ev_completed("resp-child-completion"),
+        ]),
+    )
+    .await;
     let mut builder = test_codex()
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
         .with_config(move |config| {
             config.project_doc_max_bytes = 0;
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::workspace_write())
+                .expect("thread should allow workspace writes");
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
             assert!(config.features.enable(Feature::Collab).is_ok());
             if multi_agent_v2 {
@@ -2022,17 +2815,30 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
         attach_rx,
         shutdown_rx,
     ));
-    let test = timeout(
-        Duration::from_secs(5),
-        builder.build_with_remote_and_local_env(&server),
-    )
-    .await
-    .context("thread startup should not wait for the remote environment")??;
+    let test = expect_startup(builder.build_with_remote_and_local_env(&server)).await;
+    let owner_active_profile = ActivePermissionProfile::new("owner-read-only");
+    let owner_profile_workspace_root = test.config.cwd.join("owner-profile-root");
     let remote_selection = TurnEnvironmentSelection {
         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&test.config.cwd),
         workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
-        config: EnvironmentConfigState::FromThread,
+        config: EnvironmentConfigState::Ready(EnvironmentConfig {
+            allow_login_shell: test.config.permissions.allow_login_shell,
+            workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
+            permission_profile: PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                PermissionProfile::read_only(),
+                owner_active_profile.clone(),
+                vec![owner_profile_workspace_root.clone().into()],
+            ),
+            shell_environment_policy: Default::default(),
+            windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+            windows_sandbox_type: test.config.permissions.windows_sandbox_type,
+            use_legacy_landlock: test.config.features.use_legacy_landlock(),
+            exec_policy: None,
+            mcp_policy: None,
+            network_policy: None,
+            selected_capability_roots: Vec::new(),
+        }),
     };
     let expected_environments = vec![remote_selection, local(test.config.cwd.clone())];
     let mut created_threads = test.thread_manager.subscribe_thread_created();
@@ -2067,6 +2873,24 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
     assert_eq!(
         child_thread.environment_selections().await,
         expected_environments
+    );
+    let child_snapshot = child_thread.config_snapshot().await;
+    let child_settings = child_thread.thread_settings_snapshot().await;
+    assert_ne!(
+        child_settings.permission_profile,
+        child_snapshot.permission_profile
+    );
+    assert_eq!(
+        (
+            child_snapshot.permission_profile,
+            child_snapshot.active_permission_profile,
+            child_snapshot.profile_workspace_roots,
+        ),
+        (
+            PermissionProfile::read_only(),
+            Some(owner_active_profile),
+            vec![owner_profile_workspace_root.into()],
+        )
     );
     assert!(
         response_mock.requests()[1]
@@ -2136,11 +2960,9 @@ async fn deferred_executor_guardian_uses_newly_ready_step_environment() -> Resul
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
         .with_config(|config| {
             config.project_doc_max_bytes = 0;
-            config.use_experimental_unified_exec_tool = true;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
-            assert!(config.features.enable(Feature::UnifiedExec).is_ok());
         });
     let (attach_tx, attach_rx) = tokio::sync::oneshot::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -2150,16 +2972,12 @@ async fn deferred_executor_guardian_uses_newly_ready_step_environment() -> Resul
         attach_rx,
         shutdown_rx,
     ));
-    let test = timeout(
-        Duration::from_secs(5),
-        builder.build_with_remote_and_local_env(&server),
-    )
-    .await
-    .context("thread startup should not wait for the remote environment")??;
+    let test = expect_startup(builder.build_with_remote_and_local_env(&server)).await;
     let remote_cwd = test.cwd.path().join("guardian-remote").abs();
     let local_cwd = test.cwd.path().abs();
     fs::create_dir_all(remote_cwd.as_path())?;
-    let remote_denied_path = remote_cwd.canonicalize()?.join("private");
+    // Remote policy paths use the executor's spelling; only local paths are canonicalized here.
+    let remote_denied_path = remote_cwd.join("private");
     let local_denied_path = local_cwd.canonicalize()?.join("private");
     let remote_selection = TurnEnvironmentSelection {
         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
@@ -2301,9 +3119,7 @@ async fn deferred_executor_loads_agents_md_when_environment_becomes_ready() -> R
         attach_rx,
         shutdown_rx,
     ));
-    let test = timeout(Duration::from_secs(5), builder.build(&server))
-        .await
-        .context("thread startup should not wait for the remote environment")??;
+    let test = expect_startup(builder.build(&server)).await;
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -2409,9 +3225,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
             config.model_context_window = Some(100);
             config.model_auto_compact_token_limit = Some(90);
         });
-    let test = timeout(Duration::from_secs(5), builder.build(&server))
-        .await
-        .context("thread startup should not wait for the remote environment")??;
+    let test = expect_startup(builder.build(&server)).await;
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -2484,7 +3298,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
     let rollout = fs::read_to_string(rollout_path)?;
     let world_state_items = rollout
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<serde_json::Result<Vec<_>>>()?
         .into_iter()
         .filter_map(|line| match line.item {
@@ -2521,7 +3335,8 @@ fn absolute_path(path: PathBuf) -> AbsolutePathBuf {
 
 fn read_only_sandbox(readable_root: PathBuf) -> FileSystemSandboxContext {
     let readable_root = absolute_path(readable_root);
-    FileSystemSandboxContext::from_permission_profile(PermissionProfile::from_runtime_permissions(
+    let cwd = PathUri::from_abs_path(&readable_root);
+    let permissions = PermissionProfile::from_runtime_permissions(
         &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
             path: FileSystemPath::Path {
                 path: readable_root.into(),
@@ -2530,12 +3345,14 @@ fn read_only_sandbox(readable_root: PathBuf) -> FileSystemSandboxContext {
             missing_path_behavior: None,
         }]),
         NetworkSandboxPolicy::Restricted,
-    ))
+    );
+    FileSystemSandboxContext::from_permission_profile(permissions, cwd)
 }
 
 fn workspace_write_sandbox(writable_root: PathBuf) -> FileSystemSandboxContext {
     let writable_root = absolute_path(writable_root);
-    FileSystemSandboxContext::from_permission_profile(PermissionProfile::from_runtime_permissions(
+    let cwd = PathUri::from_abs_path(&writable_root);
+    let permissions = PermissionProfile::from_runtime_permissions(
         &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
             path: FileSystemPath::Path {
                 path: writable_root.into(),
@@ -2544,7 +3361,8 @@ fn workspace_write_sandbox(writable_root: PathBuf) -> FileSystemSandboxContext {
             missing_path_behavior: None,
         }]),
         NetworkSandboxPolicy::Restricted,
-    ))
+    );
+    FileSystemSandboxContext::from_permission_profile(permissions, cwd)
 }
 
 fn assert_normalized_path_rejected(error: &std::io::Error) {
@@ -2619,7 +3437,6 @@ async fn exec_command_routing_output(
     let tools = tool_names(&request.body_json());
     assert!(tools.contains(&"exec_command".to_string()));
     assert!(tools.contains(&"write_stdin".to_string()));
-    assert!(!tools.contains(&"shell_command".to_string()));
 
     Ok(output)
 }
@@ -2647,7 +3464,10 @@ async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
     test.fs()
         .create_directory(
             &remote_cwd_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -2655,6 +3475,7 @@ async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
         .write_file(
             &remote_marker_uri,
             b"remote-routing".to_vec(),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
@@ -2693,6 +3514,7 @@ async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -2725,7 +3547,10 @@ async fn remote_exec_materializes_target_roots_before_sandbox_selection() -> Res
     test.fs()
         .create_directory(
             &remote_cwd_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -2733,6 +3558,7 @@ async fn remote_exec_materializes_target_roots_before_sandbox_selection() -> Res
         .write_file(
             &remote_cwd_uri.join(SECRET_FILE)?,
             SECRET.as_bytes().to_vec(),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
@@ -2849,6 +3675,7 @@ async fn remote_exec_materializes_target_roots_before_sandbox_selection() -> Res
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -2866,13 +3693,8 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
         config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
         config.approvals_reviewer = ApprovalsReviewer::User;
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("test config should allow feature update");
         config
             .features
             .enable(Feature::ExecPermissionApprovals)
@@ -2901,7 +3723,10 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
     test.fs()
         .create_directory(
             &remote_write_root_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -2998,7 +3823,16 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
         request.environment_id.as_deref(),
         Some(REMOTE_ENVIRONMENT_ID)
     );
-    assert_eq!(request.cwd.as_ref(), Some(&remote_cwd));
+    let request_cwd = request.cwd.expect("request cwd");
+    let expected_cwd = PathUri::from_abs_path(&remote_cwd);
+    assert_eq!(
+        request_cwd.as_str(),
+        expected_cwd.inferred_native_path_string()
+    );
+    let request_cwd: PathUri = request_cwd
+        .try_into()
+        .expect("request cwd should remain target-native");
+    assert_eq!(request_cwd, expected_cwd);
     assert_eq!(request.permissions, expected_permissions);
 
     test.codex
@@ -3040,6 +3874,7 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
         test.fs()
             .read_file_text(
                 &PathUri::from_host_native_path(&remote_target_path)?,
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?,
@@ -3056,6 +3891,7 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3085,7 +3921,10 @@ async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<
     test.fs()
         .create_directory(
             &remote_cwd_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -3129,6 +3968,7 @@ async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<
         .fs()
         .read_file_text(
             &PathUri::from_host_native_path(remote_cwd.join(file_name))?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
@@ -3144,6 +3984,7 @@ async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3175,7 +4016,10 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     test.fs()
         .create_directory(
             &remote_cwd_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -3193,6 +4037,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
             RemoveOptions {
                 recursive: false,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3297,7 +4142,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     .await;
     assert_eq!(
         test.fs()
-            .read_file_text(&target_path_uri, /*sandbox*/ None)
+            .read_file_text(&target_path_uri, Default::default(), /*sandbox*/ None)
             .await?,
         "remote\n"
     );
@@ -3312,7 +4157,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     wait_for_completion_without_patch_approval(&test).await;
     assert_eq!(
         test.fs()
-            .read_file_text(&target_path_uri, /*sandbox*/ None)
+            .read_file_text(&target_path_uri, Default::default(), /*sandbox*/ None)
             .await?,
         "remote updated\n"
     );
@@ -3324,6 +4169,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
             RemoveOptions {
                 recursive: false,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3334,6 +4180,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3363,7 +4210,10 @@ async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environm
     test.fs()
         .create_directory(
             &remote_cwd_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -3417,6 +4267,7 @@ async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environm
         .fs()
         .read_file_text(
             &PathUri::from_host_native_path(remote_cwd.join(file_name))?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
@@ -3432,6 +4283,7 @@ async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environm
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3457,7 +4309,10 @@ async fn remote_test_env_sandboxed_read_allows_readable_root() -> Result<()> {
     file_system
         .create_directory(
             &allowed_dir_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -3465,13 +4320,14 @@ async fn remote_test_env_sandboxed_read_allows_readable_root() -> Result<()> {
         .write_file(
             &file_path_uri,
             b"sandboxed hello".to_vec(),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
 
     let sandbox = read_only_sandbox(allowed_dir.clone());
     let contents = file_system
-        .read_file(&file_path_uri, Some(&sandbox))
+        .read_file(&file_path_uri, Default::default(), Some(&sandbox))
         .await?;
     assert_eq!(contents, b"sandboxed hello");
 
@@ -3481,6 +4337,7 @@ async fn remote_test_env_sandboxed_read_allows_readable_root() -> Result<()> {
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3513,7 +4370,10 @@ async fn remote_test_env_sandboxed_read_rejects_symlink_parent_dotdot_escape() -
     let requested_path =
         PathUri::from_host_native_path(allowed_dir.join("link").join("..").join("secret.txt"))?;
     let sandbox = read_only_sandbox(allowed_dir.clone());
-    let error = match file_system.read_file(&requested_path, Some(&sandbox)).await {
+    let error = match file_system
+        .read_file(&requested_path, Default::default(), Some(&sandbox))
+        .await
+    {
         Ok(_) => anyhow::bail!("read should fail after path normalization"),
         Err(error) => error,
     };
@@ -3561,6 +4421,7 @@ async fn remote_test_env_remove_removes_symlink_not_target() -> Result<()> {
             RemoveOptions {
                 recursive: false,
                 force: false,
+                follow_symlinks: true,
             },
             Some(&sandbox),
         )
@@ -3569,6 +4430,7 @@ async fn remote_test_env_remove_removes_symlink_not_target() -> Result<()> {
     let symlink_exists = file_system
         .get_metadata(
             &PathUri::from_abs_path(&absolute_path(symlink_path)),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -3577,6 +4439,7 @@ async fn remote_test_env_remove_removes_symlink_not_target() -> Result<()> {
     let outside = file_system
         .read_file_text(
             &PathUri::from_host_native_path(&outside_file)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
@@ -3588,6 +4451,7 @@ async fn remote_test_env_remove_removes_symlink_not_target() -> Result<()> {
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -3660,9 +4524,13 @@ async fn remote_test_env_copy_preserves_symlink_source() -> Result<()> {
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
         .await?;
     Ok(())
 }
+
+#[path = "remote_env_failure_tests.rs"]
+mod failure_tests;

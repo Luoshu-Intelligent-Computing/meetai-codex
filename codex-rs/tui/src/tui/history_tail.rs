@@ -1,4 +1,5 @@
 //! Update visible terminal-history tails without discarding terminal scrollback.
+//! When the existing tail is an unchanged prefix, append only the new rows.
 
 use super::Tui;
 use crate::custom_terminal::Terminal as CustomTerminal;
@@ -31,14 +32,10 @@ impl Tui {
         Self::flush_pending_history_lines(
             &mut self.terminal,
             &mut self.pending_history_lines,
-            self.is_zellij,
+            self.scrollback,
             screen_size,
         )?;
-        let mode = if self.is_zellij && wrap_policy == HistoryLineWrapPolicy::Terminal {
-            InsertHistoryMode::ZellijRaw
-        } else {
-            InsertHistoryMode::Standard
-        };
+        let mode = self.scrollback.history_insertion_mode(wrap_policy);
         let replaced = replace_visible_terminal_history_tail(
             &mut self.terminal,
             previous_lines,
@@ -70,7 +67,7 @@ where
     let Ok(previous_rows) = u16::try_from(previous_rows) else {
         return Ok(false);
     };
-    if previous_rows == 0 || previous_rows > viewport.top() {
+    if previous_rows > viewport.top() {
         return Ok(false);
     }
 

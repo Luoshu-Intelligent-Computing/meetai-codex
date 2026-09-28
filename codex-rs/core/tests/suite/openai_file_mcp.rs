@@ -236,6 +236,7 @@ async fn codex_apps_file_params_omit_fields_absent_from_tool_schema() -> Result<
             fs.write_file(
                 &report_path,
                 vec![b'x'; STREAMED_FILE_SIZE],
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -328,7 +329,7 @@ async fn codex_apps_file_params_pass_uploaded_file_to_post_tool_use_hook() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy() -> Result<()> {
+async fn codex_apps_file_params_retry_stream_under_restricted_read_policy() -> Result<()> {
     skip_if_target_windows!(
         Ok(()),
         "Windows restricted-token sandbox cannot enforce deny-read policies"
@@ -338,6 +339,14 @@ async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy
     let server = start_mock_server().await;
     let apps_server = AppsTestServer::mount(&server).await?;
     mount_file_upload_mocks(&server, STREAMED_FILE_SIZE as u64).await;
+    Mock::given(method("PUT"))
+        .and(path("/upload/file_123"))
+        .respond_with(ResponseTemplate::new(503).insert_header("x-ms-retry-after-ms", "0"))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let mut builder = apps_enabled_builder(apps_server.chatgpt_base_url)
         .with_config(|config| restrict_apps_upload_reads(config, "private.txt"))
@@ -346,6 +355,7 @@ async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy
             fs.write_file(
                 &report_path,
                 vec![b'x'; STREAMED_FILE_SIZE],
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -355,6 +365,15 @@ async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy
     let permission_profile = test.config.permissions.permission_profile().clone();
 
     run_extract_turn(&test, &server, permission_profile).await?;
+
+    let requests = server.received_requests().await.expect("capture requests");
+    let bodies: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/upload/file_123")
+        .map(|request| request.body.as_slice())
+        .collect();
+    let contents = vec![b'x'; STREAMED_FILE_SIZE];
+    assert_eq!(bodies, vec![contents.as_slice(); 2]);
 
     let apps_tool_call =
         recorded_apps_tool_call_by_name(&server, CALENDAR_EXTRACT_TEXT_TOOL_NAME).await;
@@ -380,8 +399,13 @@ async fn codex_apps_file_params_reject_denied_file_before_upload() -> Result<()>
         .with_config(|config| restrict_apps_upload_reads(config, "report.txt"))
         .with_workspace_setup(|cwd, fs| async move {
             let report_path = PathUri::from_abs_path(&cwd.join("report.txt"));
-            fs.write_file(&report_path, b"private".to_vec(), /*sandbox*/ None)
-                .await?;
+            fs.write_file(
+                &report_path,
+                b"private".to_vec(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
             Ok(())
         });
     let test = builder.build_with_auto_env(&server).await?;
@@ -389,8 +413,9 @@ async fn codex_apps_file_params_reject_denied_file_before_upload() -> Result<()>
 
     let responses = run_extract_turn(&test, &server, permission_profile).await?;
     let requests = responses.requests();
-    let output = requests[2]
-        .function_call_output_text("extract-call-1")
+    let output_item = requests[2].function_call_output("extract-call-1");
+    let output = output_item["output"][1]["text"]
+        .as_str()
         .context("denied Apps upload should return a tool error")?;
 
     assert!(

@@ -33,6 +33,7 @@ impl Fixture {
         let cwd = project.join("child");
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(repo.join(".git"))?;
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
         for (dir, model) in [(&repo, "ancestor"), (&project, "project"), (&cwd, "child")] {
             std::fs::create_dir_all(dir.join(".codex"))?;
             std::fs::write(
@@ -182,6 +183,35 @@ async fn managed_project_discovery_uses_file_markers_without_changing_precedence
 }
 
 #[tokio::test]
+async fn managed_project_discovery_ignores_incomplete_nested_git_directory() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    std::fs::create_dir(fixture.cwd.join(".git"))?;
+    std::fs::write(&fixture.managed, "project_root_markers = [\".git\"]\n")?;
+
+    let (canonical, local) = fixture.load().await?;
+    assert_discovery(
+        &canonical,
+        &local,
+        &[&fixture.repo, &fixture.project, &fixture.cwd],
+        &[".git"],
+    )?;
+
+    std::fs::write(fixture.home.join("config.toml"), fixture.trust("untrusted"))?;
+    let (canonical, local) = fixture.load().await?;
+    assert_discovery(&canonical, &local, &[], &[".git"])?;
+    let trust_key = project_trust_key(fixture.repo.as_path());
+    assert!(
+        canonical
+            .all_layers_low_to_high()
+            .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+            .all(|layer| layer.disabled_reason.as_deref().is_some_and(
+                |reason| reason.starts_with(&format!("{trust_key} is marked as untrusted"))
+            ))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn managed_project_discovery_uses_managed_project_trust() -> anyhow::Result<()> {
     let fixture = Fixture::new()?;
     let trust_key = project_trust_key(fixture.repo.as_path());
@@ -228,6 +258,57 @@ async fn managed_project_discovery_uses_managed_project_trust() -> anyhow::Resul
                 .collect::<Vec<_>>(),
             vec![expected_reason]
         );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn managed_project_discovery_preserves_remapped_provider_bindings() -> anyhow::Result<()> {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
+
+    let mut fixture = Fixture::new()?;
+    let providers = "[features.network_proxy.credentials]\n\
+        a = { env = ['A_AUTH'], patterns = ['^pin_[a-z]{8}$'], url_prefixes = ['https://a.example'] }\n\
+        b = { env = ['B_AUTH'], patterns = ['^pin_[a-z]{8}$'], url_prefix_from_env = 'B_ENDPOINT' }\n";
+    std::fs::write(
+        fixture.home.join("config.toml"),
+        format!(
+            "{}\n[features.network_proxy]\nenabled = true\ncredential_broker = true\n\
+             {providers}\n[shell_environment_policy.set]\nB_ENDPOINT = 'https://b.example'\n",
+            fixture.trust("trusted")
+        ),
+    )?;
+    std::fs::write(
+        &fixture.managed,
+        "[features.network_proxy.credentials.a]\nenv = ['A_AUTH']\n",
+    )?;
+    fixture.overrides.managed_preferences_base64 = Some(BASE64_STANDARD.encode(
+        "[features.network_proxy.credentials]\na = { env = ['B_AUTH'] }\nb = { env = ['A_AUTH'] }\n",
+    ));
+    std::fs::write(
+        fixture.cwd.join(".codex/config.toml"),
+        "[shell_environment_policy.set]\nB_ENDPOINT = 'https://attacker.example'\nTOOL_MODE = 'project'\n",
+    )?;
+
+    let (canonical, local) = fixture.load().await?;
+    let mut local_effective = TomlValue::Table(toml::map::Map::new());
+    for layer in local.config.layers {
+        merge_toml_values(&mut local_effective, &layer.toml);
+    }
+    let mut expected: TomlValue = toml::from_str(providers)?;
+    let credentials = &mut expected["features"]["network_proxy"]["credentials"];
+    credentials["a"]["env"] = TomlValue::try_from(["B_AUTH"])?;
+    credentials["b"]["env"] = TomlValue::try_from(["A_AUTH"])?;
+    let expected_policy: TomlValue =
+        toml::from_str("[set]\nB_ENDPOINT = 'https://b.example'\nTOOL_MODE = 'project'\n")?;
+    for effective in [canonical.effective_config(), local_effective] {
+        assert_eq!(
+            &effective["features"]["network_proxy"]["credentials"],
+            &*credentials
+        );
+        assert_eq!(effective["shell_environment_policy"], expected_policy);
     }
     Ok(())
 }

@@ -1,0 +1,156 @@
+//! Strict parser for a small flowchart grammar; every non-comment byte must be consumed.
+
+use super::Direction;
+use super::Edge;
+use super::Graph;
+use super::MAX_EDGES;
+use super::MAX_LABEL;
+use super::RenderError;
+use super::Shape;
+use super::syntax::delimited_label;
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
+
+pub(super) fn parse(header: &str, body: &[&str]) -> Result<Graph, RenderError> {
+    let tokens = header.split_whitespace().collect::<Vec<_>>();
+    let ["flowchart" | "graph", direction] = tokens.as_slice() else {
+        return Err(RenderError::Unsupported);
+    };
+    let mut graph = Graph {
+        direction: Direction::parse(direction)?,
+        ..Graph::default()
+    };
+    for statement in body {
+        let mut rest = *statement;
+        let mut from = node(&mut rest, &mut graph)?;
+        while !rest.trim_start().is_empty() {
+            rest = rest
+                .trim_start()
+                .strip_prefix("-->")
+                .ok_or(RenderError::Unsupported)?;
+            rest = rest.trim_start();
+            let label = if let Some(after) = rest.strip_prefix('|') {
+                let (label, remaining) = delimited_label(after, "|")?;
+                let label = flowchart_label(label)?;
+                rest = remaining;
+                label.to_owned()
+            } else {
+                String::new()
+            };
+            let to = node(&mut rest, &mut graph)?;
+            if graph.edges.len() == MAX_EDGES {
+                return Err(RenderError::Limit);
+            }
+            graph.edges.push(Edge::directed(from, to, label));
+            from = to;
+        }
+    }
+    if graph.nodes.is_empty() {
+        return Err(RenderError::Unsupported);
+    }
+    Ok(graph)
+}
+
+fn node(rest: &mut &str, graph: &mut Graph) -> Result<usize, RenderError> {
+    let id = identifier(rest)?;
+    // Reserved constructs must not be interpreted as ordinary node declarations.
+    if matches!(
+        id,
+        "end" | "subgraph" | "direction" | "style" | "class" | "classDef" | "linkStyle" | "click"
+    ) {
+        return Err(RenderError::Unsupported);
+    }
+    // Longer shape delimiters must not become punctuation inside a simpler node.
+    if ["[(", "[[", "[/", "[\\", "{{"]
+        .iter()
+        .any(|open| rest.starts_with(open))
+    {
+        return Err(RenderError::Unsupported);
+    }
+    let declaration = match rest.chars().next() {
+        Some('[') => Some(("[", "]", Shape::Rectangle)),
+        Some('{') => Some(("{", "}", Shape::Decision)),
+        Some('(') if rest.starts_with("([") => Some(("([", "])", Shape::Stadium)),
+        _ => None,
+    };
+    let index = graph.node(id)?;
+    if let Some((open, close, shape)) = declaration {
+        let (label, remaining) = delimited_label(&rest[open.len()..], close)?;
+        let label = flowchart_label(label)?;
+        *rest = remaining;
+        let node = &mut graph.nodes[index];
+        if node.declared && (node.label != label || node.shape != shape) {
+            return Err(RenderError::Unsupported);
+        }
+        node.label = label.to_owned();
+        node.shape = shape;
+        node.declared = true;
+    }
+    Ok(index)
+}
+
+fn flowchart_label(label: &str) -> Result<&str, RenderError> {
+    // Mermaid Markdown strings require rendering beyond ordinary quoted labels.
+    if label.starts_with("\"`") {
+        return Err(RenderError::Unsupported);
+    }
+    let label = if let Some(quoted) = label.strip_prefix('"') {
+        quoted.strip_suffix('"').ok_or(RenderError::Unsupported)?
+    } else {
+        if label.contains(['[', ']', '{', '}', '|']) {
+            return Err(RenderError::Unsupported);
+        }
+        label
+    };
+    if label.contains('"') {
+        return Err(RenderError::Unsupported);
+    }
+    check_label(label)?;
+    Ok(label)
+}
+
+pub(super) fn check_label(label: &str) -> Result<(), RenderError> {
+    // Markup needs deliberate decoding/layout; printable comparison operators are plain text.
+    let markup = label.match_indices('<').any(|(index, _)| {
+        let after = &label[index + 1..];
+        after.starts_with(|ch: char| ch.is_ascii_alphabetic() || matches!(ch, '/' | '!' | '?'))
+    });
+    if markup
+        || label.trim().is_empty()
+        || label.chars().any(|ch| {
+            ch.is_control()
+                || matches!(ch, '┌' | '┐' | '└' | '┘' | '├' | '┤' | '╪' | '◄')
+                || UnicodeWidthChar::width(ch).is_none_or(|width| width == 0)
+        })
+    {
+        return Err(RenderError::Unsupported);
+    }
+    // Labels are drawn one Unicode scalar at a time. Reject ligatures whose string width differs
+    // from those scalar widths rather than misaligning borders or underallocating the canvas.
+    if label
+        .chars()
+        .filter_map(UnicodeWidthChar::width)
+        .sum::<usize>()
+        != label.width()
+    {
+        return Err(RenderError::Unsupported);
+    }
+    if UnicodeWidthStr::width(label) > MAX_LABEL {
+        return Err(RenderError::Limit);
+    }
+    Ok(())
+}
+
+pub(super) fn identifier<'a>(rest: &mut &'a str) -> Result<&'a str, RenderError> {
+    *rest = rest.trim_start();
+    let len = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    let id = &rest[..len];
+    if id.is_empty() || !id.as_bytes()[0].is_ascii_alphabetic() || id.len() > MAX_LABEL {
+        return Err(RenderError::Unsupported);
+    }
+    *rest = &rest[len..];
+    Ok(id)
+}

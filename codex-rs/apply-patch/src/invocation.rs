@@ -1,8 +1,6 @@
-#[cfg(feature = "executor")]
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-#[cfg(feature = "executor")]
 use codex_exec_server::ExecutorFileSystem;
 use tree_sitter::Parser;
 use tree_sitter::Query;
@@ -10,20 +8,14 @@ use tree_sitter::QueryCursor;
 use tree_sitter::StreamingIterator;
 use tree_sitter_bash::LANGUAGE as BASH;
 
-#[cfg(feature = "executor")]
 use crate::ApplyPatchAction;
 use crate::ApplyPatchArgs;
-#[cfg(feature = "executor")]
 use crate::ApplyPatchError;
-#[cfg(feature = "executor")]
 use crate::ApplyPatchFileChange;
-#[cfg(feature = "executor")]
 use crate::ApplyPatchFileUpdate;
 use crate::ApplyPatchFileUpdateMode;
 use crate::IoError;
-#[cfg(feature = "executor")]
 use crate::MaybeApplyPatchVerified;
-#[cfg(feature = "executor")]
 use crate::parser::Hunk;
 use crate::parser::ParseError;
 use crate::parser::parse_patch;
@@ -147,7 +139,6 @@ pub fn maybe_parse_apply_patch(argv: &[String], cwd: &PathUri) -> MaybeApplyPatc
 
 /// `cwd` must identify an absolute environment-native path so relative patch paths can be
 /// resolved without projecting them onto the app-server or exec-server host.
-#[cfg(feature = "executor")]
 pub async fn maybe_parse_apply_patch_verified(
     argv: &[String],
     cwd: &PathUri,
@@ -196,7 +187,6 @@ pub async fn maybe_parse_apply_patch_verified_with_mode(
     }
 }
 
-#[cfg(feature = "executor")]
 pub async fn verify_apply_patch_args(
     args: ApplyPatchArgs,
     cwd: &PathUri,
@@ -221,7 +211,6 @@ pub async fn verify_apply_patch_args_with_mode(
     }
 }
 
-#[cfg(feature = "executor")]
 async fn try_verify_apply_patch_args(
     args: ApplyPatchArgs,
     cwd: &PathUri,
@@ -255,12 +244,18 @@ async fn try_verify_apply_patch_args(
                 changes.insert(path, ApplyPatchFileChange::Add { content: contents });
             }
             Hunk::DeleteFile { .. } => {
-                let content = fs.read_file_text(&path, sandbox).await.map_err(|source| {
-                    ApplyPatchError::IoError(IoError {
-                        context: format!("Failed to read {}", path.inferred_native_path_string()),
-                        source,
-                    })
-                })?;
+                let content = fs
+                    .read_file_text(&path, Default::default(), sandbox)
+                    .await
+                    .map_err(|source| {
+                        ApplyPatchError::IoError(IoError {
+                            context: format!(
+                                "Failed to read {}",
+                                path.inferred_native_path_string()
+                            ),
+                            source,
+                        })
+                    })?;
                 changes.insert(path, ApplyPatchFileChange::Delete { content });
             }
             Hunk::UpdateFile {
@@ -451,7 +446,7 @@ fn extract_apply_patch_from_bash(
     Err(ExtractHeredocError::CommandDidNotStartWithApplyPatch)
 }
 
-#[cfg(all(test, feature = "executor"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::unified_diff_from_chunks;

@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 
 use codex_install_context::InstallContext;
 use codex_rollout::RolloutConfig;
 use codex_rollout::first_rollout_content_match_snippet;
 use codex_rollout::parse_cursor;
 use codex_rollout::search_rollout_matches;
+use codex_utils_absolute_path::normalize_windows_device_path;
 
 use super::LocalThreadStore;
 use super::helpers::resolve_thread_names;
@@ -109,7 +112,11 @@ pub(super) async fn search_threads(
         // valid ripgrep matches. SQLite still enriches names and section metadata.
         use_state_db_only: false,
     };
-    let mut remaining_rollouts = matching_rollouts;
+    let mut remaining_rollouts = matching_rollouts
+        .into_iter()
+        .map(|(path, snippet)| (rollout_search_path(&path), snippet))
+        .collect::<HashMap<_, _>>();
+    let mut selected_rollouts: HashMap<codex_protocol::ThreadId, Option<PathBuf>> = HashMap::new();
 
     loop {
         // Content matches come from rollout files. Passing SQLite here would let its
@@ -125,7 +132,29 @@ pub(super) async fn search_threads(
         )
         .await?;
         for item in page.items {
-            let logical_path = codex_rollout::plain_rollout_path(item.path.as_path());
+            let logical_path = rollout_search_path(item.path.as_path());
+            // MeetAI: the filesystem scan also finds rollouts the state DB has not
+            // indexed yet. For threads it has indexed, keep only the selected rollout
+            // so a reverted thread does not surface its obsolete rollout.
+            if let (Some(state_db), Some(thread_id)) = (state_db.as_ref(), item.thread_id) {
+                let selected = match selected_rollouts.get(&thread_id) {
+                    Some(selected) => selected.clone(),
+                    None => {
+                        let selected = state_db
+                            .find_rollout_path_by_id(thread_id, Some(params.archived))
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|path| rollout_search_path(&path));
+                        selected_rollouts.insert(thread_id, selected.clone());
+                        selected
+                    }
+                };
+                if selected.is_some_and(|selected| selected != logical_path) {
+                    remaining_rollouts.remove(logical_path.as_path());
+                    continue;
+                }
+            }
             let Some(snippet) = (match remaining_rollouts.remove(logical_path.as_path()) {
                 Some(Some(snippet)) => Some(snippet),
                 Some(None) => first_rollout_content_match_snippet(item.path.as_path(), search_term)
@@ -198,6 +227,19 @@ pub(super) async fn search_threads(
     set_thread_search_result_names(store, &mut items).await;
 
     Ok(ThreadSearchPage { items, next_cursor })
+}
+
+fn rollout_search_path(path: &Path) -> PathBuf {
+    let path = codex_rollout::plain_rollout_path(path);
+    // Resume can persist a Windows namespace prefix while filesystem search returns the
+    // ordinary spelling. Normalize both join keys without requiring the uncompressed file
+    // to exist, and retain the filename identifying the selected rollout after a revert.
+    if cfg!(windows)
+        && let Some(normalized) = path.to_str().and_then(normalize_windows_device_path)
+    {
+        return PathBuf::from(normalized);
+    }
+    path
 }
 
 fn cursor_from_thread_search_item(
