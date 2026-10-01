@@ -19,6 +19,7 @@ use crate::test_support::responses_metadata as test_responses_metadata;
 use base64::Engine;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
+use codex_api::Reasoning;
 use codex_api::ResponseEvent;
 use codex_api::TransportError;
 use codex_http_client::HttpClientFactory;
@@ -1259,6 +1260,61 @@ fn reasoning_effort_for_requests_preserves_non_ultra_and_persistent_behavior() {
             ReasoningEffort::Custom("disabled".to_string()),
         )
     );
+}
+
+#[test]
+fn explicit_none_reasoning_is_omitted_from_provider_request() {
+    let reasoning = Reasoning {
+        effort: Some(ReasoningEffort::None),
+        summary: None,
+        context: None,
+    };
+    assert!(super::reasoning_disabled_for_request(&reasoning));
+    assert!(!super::reasoning_disabled_for_request(&Reasoning {
+        effort: Some(ReasoningEffort::Low),
+        summary: None,
+        context: None,
+    }));
+}
+
+#[test]
+fn explicit_none_reasoning_is_absent_from_serialized_responses_request() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Reply exactly OK".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        base_instructions: BaseInstructions {
+            text: "Be concise".to_string(),
+            provenance: None,
+        },
+        ..Default::default()
+    };
+    let request = client
+        .build_responses_request(
+            &prompt,
+            &test_model_info(),
+            Some(ReasoningEffort::None),
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &test_responses_metadata_for_client(
+                &client,
+                None,
+                format!("{}:0", client.state.thread_id),
+                None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+        )
+        .expect("request should build");
+    let body = serde_json::to_value(request).expect("request should serialize");
+    assert!(body.get("reasoning").is_none());
+    assert!(body.get("stream_options").is_none());
 }
 
 #[derive(Default)]

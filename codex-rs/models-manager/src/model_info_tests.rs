@@ -7,6 +7,7 @@ use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
 use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::MultiAgentMessages;
@@ -23,6 +24,14 @@ fn config_with_personality(personality: Option<Personality>) -> ModelsManagerCon
         personality,
         ..Default::default()
     }
+}
+
+#[test]
+fn local_qwen_model_advertises_native_image_input() {
+    let model = known_local_model_info_from_slug("Qwen3.6-35B-A3B-Q4")
+        .expect("local Qwen model metadata");
+    assert!(model.input_modalities.contains(&InputModality::Text));
+    assert!(model.input_modalities.contains(&InputModality::Image));
 }
 
 #[test]
