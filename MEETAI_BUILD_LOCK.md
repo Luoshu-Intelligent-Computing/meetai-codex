@@ -18,8 +18,8 @@ image tag is promoted.
 | Runtime image retained | `registry.cn-hangzhou.aliyuncs.com/meetai/codex-runtime:607e72f29-amd64` |
 
 The upstream reference was fetched through the local proxy at `127.0.0.1:1081`.
-It has not been merged into the MeetAI fork. Integration must happen on a
-dedicated synchronization branch after history and protocol review.
+合并已在上述同步分支进行；旧源码与已验证制品保留为回退基线。
+共同祖先、冲突处理及同步验证见 `UPSTREAM_SYNC.md`。
 
 ## Build contract
 
@@ -40,7 +40,7 @@ the fork commit, and record the resulting SHA256 beside the runtime image tag.
 
 - Source and upstream refs recorded.
 - Upstream fetch passed through `127.0.0.1:1081`.
-- Upstream merge pending history deepening and semantic review.
+- 双方历史已补齐，上游合并后的 app-server 编译检查通过。
 - 本机已安装 stable Rust 和仓库锁定的 Rust 1.95.0；构建使用后者。
 - 2026-10-05：`cargo build --release --locked --bin codex-app-server -j 2`
   成功，耗时 46 分 34 秒，源码检出提交为
@@ -54,4 +54,8 @@ the fork commit, and record the resulting SHA256 beside the runtime image tag.
 - 原始产物 SHA256：
   `7620e84bce4a7dd87837283249bdf9b184a64ae7ded63e3adc61116b9a7d3fa5`。
 - 构建存在 unused/dead-code 警告；本轮未修改源码消除警告。
-- 完整模型任务、消费者端到端 smoke 和上游合并验证尚未执行；尚未发布新镜像。
+- 上述 SHA256 对应旧 MeetAI 基线，不代表上游合并后的制品。
+- 合并后 `just fmt` / `just fmt-check`、PPT 适配器与配置 26 项测试、
+  MCP HTTP 进度通知集成测试通过。
+- 上游合并后的 release 构建和其余回归验证进行中；尚未发布新镜像。
+- 完整模型任务和全栈消费者端到端验证尚未执行。

@@ -28,8 +28,8 @@ fn config_with_personality(personality: Option<Personality>) -> ModelsManagerCon
 
 #[test]
 fn local_qwen_model_advertises_native_image_input() {
-    let model = known_local_model_info_from_slug("Qwen3.6-35B-A3B-Q4")
-        .expect("local Qwen model metadata");
+    let model =
+        known_local_model_info_from_slug("Qwen3.6-35B-A3B-Q4").expect("local Qwen model metadata");
     assert!(model.input_modalities.contains(&InputModality::Text));
     assert!(model.input_modalities.contains(&InputModality::Image));
 }
@@ -91,6 +91,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         computer_use: Some("  # Native policy\r\n\n${native_markdown}\n".to_string()),
     };
     let mut messages = ModelMessages {
+        content_filter_guidance: None,
         persistent_instructions: Some(persistent_instructions.to_string()),
         tools: Some(ToolMessages {
             send_user_message_async: Some(ToolMessage {

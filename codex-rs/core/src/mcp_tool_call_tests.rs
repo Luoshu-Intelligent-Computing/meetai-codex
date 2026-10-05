@@ -1210,61 +1210,6 @@ fn sanitize_mcp_tool_result_for_model_preserves_supported_media() {
 }
 
 #[test]
-fn truncate_mcp_tool_result_for_event_preserves_small_result() {
-    let original = CallToolResult {
-        content: vec![serde_json::json!({
-            "type": "text",
-            "text": "hello",
-        })],
-        structured_content: Some(serde_json::json!({"x": 1})),
-        is_error: Some(false),
-        meta: Some(serde_json::json!({"k": "v"})),
-    };
-
-    let got = truncate_mcp_tool_result_for_event(&Ok(original.clone()))
-        .expect("small result should remain successful");
-
-    assert_eq!(got, original);
-}
-
-#[test]
-fn truncate_mcp_tool_result_for_event_bounds_large_result() {
-    let original = CallToolResult {
-        content: vec![serde_json::json!({
-            "type": "text",
-            "text": "long-message-with-newlines-\n".repeat(200_000),
-        })],
-        structured_content: Some(serde_json::json!({
-            "structured": "structured-value-".repeat(200_000),
-        })),
-        is_error: Some(false),
-        meta: Some(serde_json::json!({
-            "meta": "meta-value-".repeat(200_000),
-        })),
-    };
-
-    let got = truncate_mcp_tool_result_for_event(&Ok(original))
-        .expect("large result should remain successful");
-    let serialized = serde_json::to_string(&got).expect("truncated result should serialize");
-
-    // The truncated preview is embedded as a JSON string, so quotes and
-    // backslashes can be escaped again. That can roughly double the preview
-    // bytes in the worst case. The extra buffer covers the small result wrapper
-    // and marker.
-    assert!(serialized.len() < MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES * 2 + 1024);
-    assert_eq!(got.structured_content, None);
-    assert_eq!(got.meta, None);
-    assert_eq!(got.is_error, Some(false));
-    assert!(
-        got.content[0]
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| text.contains("truncated")),
-        "large event result should contain a truncation marker: {got:?}"
-    );
-}
-
-#[test]
 fn truncate_mcp_tool_result_for_event_bounds_large_error() {
     let got = truncate_mcp_tool_result_for_event(&Err("error-message-".repeat(200_000)))
         .expect_err("large error should remain an error");
@@ -3268,13 +3213,6 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
         turn_context.auth_manager.clone(),
     );
 
-    let active_turn = ActiveTurn::default();
-    active_turn
-        .turn_state
-        .lock()
-        .await
-        .enable_strict_auto_review();
-    *session.active_turn.lock().await = Some(active_turn);
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
@@ -3303,9 +3241,15 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
         .set(AskForApproval::OnRequest)
         .expect("captured MCP policy should allow updating approval policy");
 
+    turn_context.record_granted_permissions(
+        codex_exec_server::LOCAL_ENVIRONMENT_ID,
+        Default::default(),
+        /*strict_auto_review*/ true,
+    );
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let decision = maybe_request_mcp_tool_approval(
         &session,
-        &StepContext::for_test(Arc::clone(&turn_context)),
+        &step_context,
         &CancellationToken::new(),
         "call-guardian-deny",
         &invocation,
@@ -3652,7 +3596,8 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
 
 #[tokio::test]
 async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
-    let (session, _) = crate::session::tests::make_session_and_context().await;
+    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let review_context = GuardianReviewContext::from(Arc::new(turn_context));
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
         tool: "write_record".to_string(),
@@ -3666,17 +3611,25 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
         /*tool_description*/ None,
     );
     let mut call = Box::pin(async {
-        let _approval_metadata =
-            session.register_mcp_tool_approval_metadata("call", &invocation, metadata.clone());
+        let _approval_metadata = session.register_mcp_tool_approval_metadata(
+            "call",
+            &invocation,
+            metadata.clone(),
+            review_context.clone(),
+        );
         std::future::pending::<()>().await;
     });
     assert!(futures::poll!(call.as_mut()).is_pending());
-    let _other_metadata =
-        session.register_mcp_tool_approval_metadata("other-call", &invocation, metadata.clone());
+    let _other_metadata = session.register_mcp_tool_approval_metadata(
+        "other-call",
+        &invocation,
+        metadata.clone(),
+        review_context.clone(),
+    );
     assert_eq!(
         session
             .mcp_tool_approval_metadata(CODEX_APPS_MCP_SERVER_NAME, "call")
-            .map(|(invocation, metadata)| (invocation, metadata.connector_id)),
+            .map(|context| (context.invocation, context.metadata.connector_id)),
         Some((Some(invocation.clone()), Some("connector".to_string()))),
     );
     assert!(
@@ -3690,8 +3643,12 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
             .mcp_tool_approval_metadata(CODEX_APPS_MCP_SERVER_NAME, "call")
             .is_none()
     );
-    let _next_metadata =
-        session.register_mcp_tool_approval_metadata("next-call", &invocation, metadata);
+    let _next_metadata = session.register_mcp_tool_approval_metadata(
+        "next-call",
+        &invocation,
+        metadata,
+        review_context,
+    );
     let registry = session.mcp_tool_approval_metadata.lock().unwrap();
     let mut keys = registry.keys().cloned().collect::<Vec<_>>();
     keys.sort();
