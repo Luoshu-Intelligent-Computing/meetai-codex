@@ -71,5 +71,26 @@ the fork commit, and record the resulting SHA256 beside the runtime image tag.
 - 原始 SHA256：`b71251125596582985eee7dcfb179b8f8be25a66087c4ac141012d5a9ce21450`。
 - 原始和 stripped 二进制均通过 CLI help、真实 PPT 适配器 initialize/thread-start、
   Agent 请求字段 initialize/thread-start/thread-list 检查；未发起 turn 或模型推理。
-- 本机 `unshare -Ur true` 返回权限错误，AppArmor user namespace 限制开启。
-  app-server 提示 bubblewrap 沙箱不可用，沙箱工具执行与镜像内合同仍待部署环境验证。
+- 已通过 sudo 添加 `/etc/apparmor.d/bwrap` 专用 AppArmor profile：
+  `/usr/bin/bwrap` 使用 `flags=(unconfined)` 和 `userns,`，并用
+  `sudo apparmor_parser -r /etc/apparmor.d/bwrap` 加载。保留全局
+  `kernel.apparmor_restrict_unprivileged_userns=1`；一般程序的 `unshare`
+  仍可能受限，不代表 bubblewrap 失败。
+- bubblewrap 的 user/network namespace 检查通过，app-server 沙箱警告消失。
+  标准 `command/exec`（workspaceWrite）实际执行验证：工作区内写入/读取成功，
+  工作区外写入返回只读文件系统错误。CODEX_HOME 使用用户缓存目录，避免
+  `/tmp` 中的 helper alias 被拒绝。此次未调用模型或执行 Agent turn。
+- `scripts/test-codex-runtime-image-contract.sh` 静态合同通过。
+- 已安装 Podman 4.9.3 并确认 rootless 模式，候选镜像
+  `localhost/meetai-codex-runtime:43689d6-amd64` 已本地构建，约 505 MiB。
+  image ID：`6e611e33e56cb1a3fdf13125c8bc5501380d561067e3737c05aa94a751debfd8`；
+  labels 中的源码提交及二进制 SHA256 与上述锁定值一致。
+- 镜像内 initialize、真实 command/exec 工作区写入和工作区外写入拒绝均通过。
+  本机 rootless Podman 需 `--security-opt 'unmask=/proc/*'`，否则 bubblewrap
+  返回 `Can't mount proc on /proc`；同时使用
+  `--userns=keep-id:uid=999,gid=999` 映射挂载目录的当前用户到镜像 agentuser。
+  验证使用 `--network none`，未增加 privileged 或修改默认 seccomp。
+  这些结论针对本机 Podman，不代替其他部署环境的验证。
+- 候选镜像未发布，生产镜像锁未修改；完整 Agent turn 与模型推理仍待验证。
+- 如需撤销本机许可：`sudo apparmor_parser -R /etc/apparmor.d/bwrap`，然后
+  删除该 profile 文件；这不涉及仓库源码或模型配置。

@@ -19,7 +19,11 @@ against OpenAI Codex commit `823ea830c0fd418b09ff02d36cad9a1fff66465b`.
 26 项模拟服务测试通过。`just test` 运行的 14 项定向回归测试及 1 项 MCP
 HTTP 进度通知集成测试全部通过。release 构建完成（41 分 56 秒）；原始与 stripped 二进制均通过真实 PPT
 适配器握手/线程创建以及 Agent 请求字段握手/线程创建/线程列表检查。
-本机 user namespace 受 AppArmor 限制，未验证沙箱工具执行与模型任务。
+已为本机 `/usr/bin/bwrap` 加载专用 AppArmor userns 许可；全局限制保持开启。
+真实 `command/exec` 工作区内写入/读取通过，工作区外写入被拒绝，沙箱警告
+消失；运行时镜像静态合同通过。本地 rootless Podman 候选镜像已构建，
+镜像内握手、沙箱写入和外部写入拒绝通过（需取消 `/proc/*` 的容器屏蔽，
+具体运行参数见 `MEETAI_BUILD_LOCK.md`）。完整模型任务仍待验证。
 
 测试编译发现上游 `build_responses_request` 新增 `include_internal` 参数，已
 适配本地 reasoning disabled 测试（生产源码已通过编译，无需改动调用路径）。
