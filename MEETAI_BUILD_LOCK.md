@@ -10,7 +10,8 @@ image tag is promoted.
 | Field | Value |
 |---|---|
 | MeetAI fork | `git@github.com:Luoshu-Intelligent-Computing/meetai-codex.git` |
-| MeetAI commit | `e223405ddcb7c53a51fe19c814f5cb78c4a3473b` |
+| MeetAI commit before sync | `e223405ddcb7c53a51fe19c814f5cb78c4a3473b` |
+| MeetAI source merge | `43689d6cd36b46ee3bf78bc52128801851aa1044` |
 | Upstream | `https://github.com/openai/codex.git` |
 | Upstream reference checked | `823ea830c0fd418b09ff02d36cad9a1fff66465b` |
 | Sync branch | `sync/upstream-823ea83` |
@@ -57,5 +58,18 @@ the fork commit, and record the resulting SHA256 beside the runtime image tag.
 - 上述 SHA256 对应旧 MeetAI 基线，不代表上游合并后的制品。
 - 合并后 `just fmt` / `just fmt-check`、PPT 适配器与配置 26 项测试、
   MCP HTTP 进度通知集成测试通过。
-- 上游合并后的 release 构建和其余回归验证进行中；尚未发布新镜像。
+- 上游合并后的 release 构建完成（41 分 56 秒），15 项 Rust 定向测试通过；尚未发布新镜像。
 - 完整模型任务和全栈消费者端到端验证尚未执行。
+
+## 上游合并后制品（2026-10-05）
+
+- 源码：`43689d6cd36b46ee3bf78bc52128801851aa1044`。
+- 构建：Rust 1.95.0，`cargo build --release --locked --bin codex-app-server -j 2`。
+- staging：`codex-rs/target/staged-upstream-823ea83/codex-app-server`，
+  x86_64，218255720 字节；相邻 JSON 记录来源。
+- staging SHA256：`9ea1af845ad55065eac539a814b7725b697ef4304b944fd3768172bb8db0febd`。
+- 原始 SHA256：`b71251125596582985eee7dcfb179b8f8be25a66087c4ac141012d5a9ce21450`。
+- 原始和 stripped 二进制均通过 CLI help、真实 PPT 适配器 initialize/thread-start、
+  Agent 请求字段 initialize/thread-start/thread-list 检查；未发起 turn 或模型推理。
+- 本机 `unshare -Ur true` 返回权限错误，AppArmor user namespace 限制开启。
+  app-server 提示 bubblewrap 沙箱不可用，沙箱工具执行与镜像内合同仍待部署环境验证。

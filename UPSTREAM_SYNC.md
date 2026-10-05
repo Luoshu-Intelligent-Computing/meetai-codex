@@ -17,7 +17,9 @@ against OpenAI Codex commit `823ea830c0fd418b09ff02d36cad9a1fff66465b`.
 2026-10-05：合并后的 `cargo check --locked --bin codex-app-server -j 2`
 通过（6 分 48 秒），`just fmt` 和 `just fmt-check` 通过；PPT 适配器与配置
 26 项模拟服务测试通过。`just test` 运行的 14 项定向回归测试及 1 项 MCP
-HTTP 进度通知集成测试全部通过。新 release 二进制和真实进程验证仍在进行。
+HTTP 进度通知集成测试全部通过。release 构建完成（41 分 56 秒）；原始与 stripped 二进制均通过真实 PPT
+适配器握手/线程创建以及 Agent 请求字段握手/线程创建/线程列表检查。
+本机 user namespace 受 AppArmor 限制，未验证沙箱工具执行与模型任务。
 
 测试编译发现上游 `build_responses_request` 新增 `include_internal` 参数，已
 适配本地 reasoning disabled 测试（生产源码已通过编译，无需改动调用路径）。
@@ -57,3 +59,6 @@ dead-code 警告保留。未执行整个工作区测试套件。
   consumer-level behavior.
 - `llm-service`: Qwen serving, image input adaptation, model capabilities,
   runtime images, and NVIDIA/Ascend deployment concerns.
+
+同步合并提交：`43689d6cd36b46ee3bf78bc52128801851aa1044`，已推送同步分支。
+新制品来源与哈希见 `MEETAI_BUILD_LOCK.md`，生产镜像锁未更新。
