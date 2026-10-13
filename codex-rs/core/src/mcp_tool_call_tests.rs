@@ -130,6 +130,21 @@ fn meetai_library_scope_v2_preserves_independent_library_selections() {
 }
 
 #[test]
+fn meetai_library_scope_v2_preserves_explicit_disabled_library() {
+    let scope = serde_json::json!({
+        "schema": "meetai.scope.v2",
+        "library": {"selections": []},
+    });
+    let scope_object = scope.as_object().unwrap();
+    validate_meetai_library_scope(scope_object, &scope["library"])
+        .expect("empty selections explicitly disable the library");
+    assert_eq!(
+        augment_meetai_library_scope_request_meta(None, &Some(scope.clone())).unwrap(),
+        Some(serde_json::json!({MEETAI_LIBRARY_SCOPE_META_KEY: scope}))
+    );
+}
+
+#[test]
 fn meetai_library_scope_validation_rejects_unknown_and_malformed_fields() {
     let invalid_scopes = [
         serde_json::json!({
@@ -158,10 +173,6 @@ fn meetai_library_scope_validation_rejects_unknown_and_malformed_fields() {
             "schema": "meetai.scope.v1",
             "library": {"projectKey": "project"},
             "extra": true,
-        }),
-        serde_json::json!({
-            "schema": "meetai.scope.v2",
-            "library": {"selections": []},
         }),
         serde_json::json!({
             "schema": "meetai.scope.v2",

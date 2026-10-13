@@ -1310,6 +1310,7 @@ fn explicit_none_reasoning_is_absent_from_serialized_responses_request() {
                 None,
                 TestCodexResponsesRequestKind::Turn,
             ),
+            false,
         )
         .expect("request should build");
     let body = serde_json::to_value(request).expect("request should serialize");

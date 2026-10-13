@@ -1032,7 +1032,6 @@ fn validate_meetai_library_scope_v2(library: &JsonValue) -> anyhow::Result<()> {
     let selections = library
         .get("selections")
         .and_then(JsonValue::as_array)
-        .filter(|selections| !selections.is_empty())
         .ok_or_else(|| anyhow::anyhow!("MeetAI library scope is invalid"))?;
 
     let mut has_personal_selection = false;
