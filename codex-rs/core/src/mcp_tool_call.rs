@@ -127,6 +127,13 @@ const MEETAI_APPLICATION_CONTEXT_KEY: &str = "application";
 const MEETAI_LIBRARY_SCOPE_META_KEY: &str = "meetai/library_scope";
 const MEETAI_LIBRARY_SCOPE_SCHEMA_V1: &str = "meetai.scope.v1";
 const MEETAI_LIBRARY_SCOPE_SCHEMA_V2: &str = "meetai.scope.v2";
+const MEETAI_SELECTED_SOURCES_CONTEXT_KEY: &str = "selected_sources";
+const MEETAI_SELECTED_SOURCES_META_KEY: &str = "meetai/selected_sources";
+const MEETAI_SELECTED_SOURCES_SCHEMA_V1: &str = "meetai.selected_sources.v1";
+/// Only these tools accept `meetai/selected_sources`; the server rejects it elsewhere.
+const MEETAI_SELECTED_SOURCES_TOOLS: &[&str] = &["presentation.generate", "document.generate"];
+const MEETAI_SELECTED_SOURCES_MAX_DOCUMENTS: usize = 8;
+const MEETAI_SELECTED_SOURCES_MAX_TASKS: usize = 5;
 
 /// Handles the specified tool call and dispatches the appropriate MCP tool-call
 /// item lifecycle events to the `Session`.
@@ -236,6 +243,27 @@ pub(crate) async fn handle_mcp_tool_call(
             };
         }
     };
+    let meetai_selected_sources =
+        match snapshot_meetai_selected_sources(&sess, &server, &tool_name).await {
+            Ok(sources) => sources,
+            Err(error) => {
+                let result = notify_mcp_tool_call_skip(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    &call_id,
+                    invocation,
+                    item_metadata,
+                    format!("tool call error: {error}"),
+                    /*already_started*/ false,
+                )
+                .await;
+                return HandledMcpToolCall {
+                    result: CallToolResult::from_result(result),
+                    tool_input: arguments_value
+                        .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+                };
+            }
+        };
     let runtime_config = prepared_call.config();
     let app_tool_policy = if server == CODEX_APPS_MCP_SERVER_NAME {
         let annotations = metadata.annotations.as_ref();
@@ -334,6 +362,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     metadata,
                     item_metadata,
                     meetai_library_scope,
+                    meetai_selected_sources,
                     source,
                     McpToolApprovalApplication::Apply {
                         decision,
@@ -413,6 +442,7 @@ pub(crate) async fn handle_mcp_tool_call(
         metadata,
         item_metadata,
         meetai_library_scope,
+        meetai_selected_sources,
         source,
         McpToolApprovalApplication::NotRequired,
     )
@@ -480,6 +510,7 @@ async fn handle_approved_mcp_tool_call(
     metadata: McpToolApprovalMetadata,
     item_metadata: McpToolCallItemMetadata,
     meetai_library_scope: Option<JsonValue>,
+    meetai_selected_sources: Option<JsonValue>,
     source: &crate::tools::context::ToolCallSource,
     approval_application: McpToolApprovalApplication,
 ) -> HandledMcpToolCall {
@@ -565,6 +596,10 @@ async fn handle_approved_mcp_tool_call(
                     let request_meta = augment_meetai_library_scope_request_meta(
                         request_meta,
                         &meetai_library_scope,
+                    )?;
+                    let request_meta = augment_meetai_selected_sources_request_meta(
+                        request_meta,
+                        &meetai_selected_sources,
                     )?;
                     let request_meta = augment_mcp_tool_request_meta_with_sandbox_state(
                         step_context,
@@ -960,12 +995,14 @@ async fn snapshot_meetai_library_scope(
         );
         anyhow::anyhow!("MeetAI library scope is invalid")
     })?;
-    let serde_json::Value::Object(scope) = scope else {
+    let serde_json::Value::Object(mut scope) = scope else {
         tracing::warn!(
             "rejecting MeetAI MCP tool call because the application library scope is not an object"
         );
         anyhow::bail!("MeetAI library scope is invalid");
     };
+    // Sent separately as `meetai/selected_sources`, never inside the library scope.
+    scope.remove(MEETAI_SELECTED_SOURCES_CONTEXT_KEY);
     let Some(library) = scope.get("library") else {
         return Ok(None);
     };
@@ -973,6 +1010,86 @@ async fn snapshot_meetai_library_scope(
     validate_meetai_library_scope(&scope, library)?;
 
     Ok(Some(JsonValue::Object(scope)))
+}
+
+async fn snapshot_meetai_selected_sources(
+    session: &Session,
+    server: &str,
+    tool_name: &str,
+) -> anyhow::Result<Option<JsonValue>> {
+    if server != MEETAI_RESOURCE_MCP_SERVER_NAME
+        || !MEETAI_SELECTED_SOURCES_TOOLS.contains(&tool_name)
+    {
+        return Ok(None);
+    }
+    let Some(application_context) = session
+        .snapshot_application_context_value(MEETAI_APPLICATION_CONTEXT_KEY)
+        .await
+    else {
+        return Ok(None);
+    };
+    let Ok(JsonValue::Object(mut application)) =
+        serde_json::from_str::<JsonValue>(&application_context)
+    else {
+        anyhow::bail!("MeetAI selected sources are invalid");
+    };
+    let Some(selected_sources) = application.remove(MEETAI_SELECTED_SOURCES_CONTEXT_KEY) else {
+        return Ok(None);
+    };
+    validate_meetai_selected_sources(&selected_sources)?;
+    Ok(Some(selected_sources))
+}
+
+fn validate_meetai_selected_sources(value: &JsonValue) -> anyhow::Result<()> {
+    let invalid = || anyhow::anyhow!("MeetAI selected sources are invalid");
+    let sources = value.as_object().ok_or_else(invalid)?;
+    if sources
+        .keys()
+        .any(|key| !["schema", "document_ids", "task_ids"].contains(&key.as_str()))
+    {
+        return Err(invalid());
+    }
+    if sources.get("schema").and_then(JsonValue::as_str) != Some(MEETAI_SELECTED_SOURCES_SCHEMA_V1)
+    {
+        return Err(invalid());
+    }
+    let mut has_source = false;
+    for (key, max) in [
+        ("document_ids", MEETAI_SELECTED_SOURCES_MAX_DOCUMENTS),
+        ("task_ids", MEETAI_SELECTED_SOURCES_MAX_TASKS),
+    ] {
+        let Some(ids) = sources.get(key) else {
+            continue;
+        };
+        validate_meetai_scope_string_list(ids).map_err(|_| invalid())?;
+        if ids.as_array().map_or(0, Vec::len) > max {
+            return Err(invalid());
+        }
+        has_source = true;
+    }
+    if !has_source {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn augment_meetai_selected_sources_request_meta(
+    mut meta: Option<JsonValue>,
+    selected_sources: &Option<JsonValue>,
+) -> anyhow::Result<Option<JsonValue>> {
+    let Some(selected_sources) = selected_sources else {
+        return Ok(meta);
+    };
+    let JsonValue::Object(request_meta) =
+        meta.get_or_insert_with(|| JsonValue::Object(serde_json::Map::new()))
+    else {
+        anyhow::bail!("MeetAI MCP request metadata is invalid");
+    };
+    request_meta.insert(
+        MEETAI_SELECTED_SOURCES_META_KEY.to_string(),
+        selected_sources.clone(),
+    );
+    Ok(meta)
 }
 
 fn validate_meetai_library_scope(

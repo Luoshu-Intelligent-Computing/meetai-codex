@@ -208,6 +208,62 @@ fn meetai_library_scope_validation_rejects_unknown_and_malformed_fields() {
     }
 }
 
+#[test]
+fn meetai_selected_sources_validation_accepts_contract_shape_only() {
+    let valid = serde_json::json!({
+        "schema": "meetai.selected_sources.v1",
+        "document_ids": ["document-a"],
+        "task_ids": ["task-a", "task-b"],
+    });
+    assert!(validate_meetai_selected_sources(&valid).is_ok());
+    assert!(
+        validate_meetai_selected_sources(&serde_json::json!({
+            "schema": "meetai.selected_sources.v1",
+            "task_ids": ["task-a"],
+        }))
+        .is_ok()
+    );
+
+    let too_many_tasks: Vec<String> = (0..6).map(|index| format!("task-{index}")).collect();
+    let invalid = [
+        serde_json::json!({"schema": "meetai.selected_sources.v1"}),
+        serde_json::json!({"schema": "other", "task_ids": ["task-a"]}),
+        serde_json::json!({"schema": "meetai.selected_sources.v1", "task_ids": []}),
+        serde_json::json!({"schema": "meetai.selected_sources.v1", "task_ids": ["task-a", "task-a"]}),
+        serde_json::json!({"schema": "meetai.selected_sources.v1", "task_ids": too_many_tasks}),
+        serde_json::json!({"schema": "meetai.selected_sources.v1", "task_ids": ["task-a"], "extra": 1}),
+    ];
+    for value in invalid {
+        assert!(validate_meetai_selected_sources(&value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn meetai_selected_sources_request_meta_sits_beside_library_scope() {
+    let sources = serde_json::json!({
+        "schema": "meetai.selected_sources.v1",
+        "document_ids": ["document-a"],
+    });
+    let meta = augment_meetai_library_scope_request_meta(
+        None,
+        &Some(serde_json::json!({"schema": "meetai.scope.v2", "library": {"selections": []}})),
+    )
+    .unwrap();
+    let meta = augment_meetai_selected_sources_request_meta(meta, &Some(sources.clone())).unwrap();
+    let meta = meta.unwrap();
+    assert_eq!(meta["meetai/selected_sources"], sources);
+    assert!(
+        meta["meetai/library_scope"]
+            .get("selected_sources")
+            .is_none()
+    );
+    assert!(
+        augment_meetai_selected_sources_request_meta(None, &None)
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn annotations(
     read_only: Option<bool>,
     destructive: Option<bool>,
